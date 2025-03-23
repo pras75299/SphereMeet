@@ -28,10 +28,14 @@ function NavContent({ children }: { children: React.ReactNode }) {
   }, [isHydrated, hydrate]);
 
   useEffect(() => {
-    if (isHydrated && (!token || !user)) {
-      router.push('/');
+    if (isHydrated) {
+      if (!token || !user) {
+        router.push('/');
+      } else if (!spaceId && pathname !== '/') {
+        router.push('/');
+      }
     }
-  }, [token, user, router, isHydrated]);
+  }, [token, user, router, isHydrated, spaceId, pathname]);
 
   const tabs = [
     { name: 'Meetings', href: `/meetings?space=${spaceId}` },
@@ -57,7 +61,7 @@ function NavContent({ children }: { children: React.ReactNode }) {
 
   return (
     <WebSocketProvider spaceId={spaceId}>
-      <div className="min-h-screen flex flex-col bg-[var(--background)]">
+      <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-[var(--background)]">
         <header
           className="flex-shrink-0 px-4 py-2 flex items-center justify-between"
           style={{
@@ -113,7 +117,7 @@ function NavContent({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
-        <main className="flex-1 overflow-hidden">
+        <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {children}
         </main>
       </div>

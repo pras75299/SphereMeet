@@ -35,10 +35,10 @@ function renderMessageWithMentions(body: string, currentUserId?: string) {
     parts.push(
       <span
         key={match.index}
-        className={`px-1 rounded ${
-          isSelfMention 
-            ? 'bg-yellow-500/30 text-yellow-300 font-medium' 
-            : 'bg-[var(--primary)]/30 text-[var(--primary)] font-medium'
+        className={`px-1 ${
+          isSelfMention
+            ? 'bg-yellow-500/30 text-yellow-300 font-medium'
+            : 'bg-[var(--primary)]/30 text-[var(--primary-lit)] font-medium'
         }`}
       >
         @{mentionedName}
@@ -134,7 +134,7 @@ function ChatContent() {
     setCurrentChannel(channelId);
   }, [setCurrentChannel]);
 
-  const handleGoToMeet = useCallback(() => {
+  const handleGoToActivity = useCallback(() => {
     router.push(`/activity?space=${spaceId}`);
   }, [router, spaceId]);
 
@@ -244,44 +244,50 @@ function ChatContent() {
   }, [showMentions, filteredMentionUsers, selectedMentionIndex, insertMention]);
 
   return (
-    <div className="h-[calc(100vh-60px)] flex">
-      {/* Left sidebar - Channels */}
-      <div className="w-60 bg-[var(--card)] border-r border-[var(--border)] flex flex-col">
-        <div className="p-4 border-b border-[var(--border)]">
-          <h2 className="font-semibold text-sm text-[var(--muted)]">CHANNELS</h2>
+    <div className="flex h-full min-h-0 w-full flex-1 bg-[#10141a]">
+      {/* Channel rail — Stitch “Chat Mode Terminal” */}
+      <aside
+        className="flex w-52 shrink-0 flex-col border-r-2 sm:w-[240px]"
+        style={{ borderColor: '#464554', background: '#1c2026' }}
+      >
+        <div className="border-b-2 px-3 py-3" style={{ borderColor: '#464554' }}>
+          <h2 className="pixel-mono text-[10px] font-bold uppercase tracking-[0.2em] text-[#c7c4d7]">
+            &gt; CHANNELS
+          </h2>
         </div>
-        <div className="flex-1 overflow-auto py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto py-2">
           {CHANNELS.map((channel) => (
             <button
               key={channel.id}
+              type="button"
               onClick={() => handleChannelChange(channel.id)}
-              className={`w-full px-4 py-2 text-left flex items-center gap-2 transition-colors ${
-                currentChannel === channel.id
-                  ? 'bg-[var(--primary)] text-white'
-                  : 'text-[var(--muted)] hover:bg-[var(--card-hover)] hover:text-white'
-              }`}
+              className="pixel-mono flex w-full items-center gap-2 px-3 py-2 text-left text-xs uppercase tracking-wider transition-colors duration-100"
+              style={{
+                background: currentChannel === channel.id ? 'linear-gradient(180deg, #c0c1ff 0%, #8083ff 100%)' : 'transparent',
+                color: currentChannel === channel.id ? '#1000a9' : '#c7c4d7',
+                borderBottom: currentChannel === channel.id ? '2px solid #494bd6' : '2px solid transparent',
+              }}
             >
-              <span className="text-lg">{channel.icon}</span>
-              <span className="text-sm">{channel.name}</span>
+              <span className={currentChannel === channel.id ? 'text-[#1000a9]' : 'text-[#ffb95f]'}>#</span>
+              <span>{channel.id}</span>
             </button>
           ))}
         </div>
 
-        {/* Online users section */}
-        <div className="border-t border-[var(--border)]">
-          <div className="p-4">
-            <h2 className="font-semibold text-sm text-[var(--muted)] mb-2">
-              ONLINE ({onlineUsers.length})
-            </h2>
+        <div className="border-t-2" style={{ borderColor: '#464554' }}>
+          <div className="px-3 py-2">
+            <p className="pixel-mono text-[10px] font-bold uppercase tracking-widest text-[#c7c4d7]">
+              &gt; ONLINE ({onlineUsers.length})
+            </p>
           </div>
-          <div className="max-h-40 overflow-auto pb-4">
+          <div className="max-h-36 overflow-y-auto pb-2">
             {onlineUsers.map((userPresence) => (
               <div
                 key={userPresence.user_id}
-                className="px-4 py-1 flex items-center gap-2"
+                className="flex items-center gap-2 px-3 py-1 pixel-mono text-[10px] text-[var(--foreground)]"
               >
-                <span className="w-2 h-2 rounded-full bg-green-500"></span>
-                <span className="text-sm truncate">
+                <span className="pixel-badge-on shrink-0" aria-hidden />
+                <span className="truncate uppercase tracking-wide">
                   {userPresence.display_name}
                   {user?.id === userPresence.user_id && ' (you)'}
                 </span>
@@ -289,94 +295,136 @@ function ChatContent() {
             ))}
           </div>
         </div>
-      </div>
+      </aside>
 
-      {/* Main chat area */}
-      <div className="flex-1 flex flex-col">
-        {/* Channel header */}
-        <div className="h-14 px-4 border-b border-[var(--border)] flex items-center justify-between bg-[var(--card)]">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">#</span>
-            <span className="font-semibold">
-              {CHANNELS.find((c) => c.id === currentChannel)?.name || currentChannel}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <header
+          className="flex shrink-0 items-center justify-between gap-2 border-b-2 px-3 py-2 sm:px-4"
+          style={{ borderColor: '#464554', background: '#181c22' }}
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="pixel-mono text-[#ffb95f]">#</span>
+            <span
+              className="truncate font-bold uppercase tracking-widest pixel-mono text-xs sm:text-sm"
+              style={{ color: '#dfe2eb', fontFamily: "'Share Tech Mono', monospace" }}
+            >
+              {currentChannel}
             </span>
             {!isConnected && (
-              <span className="px-2 py-0.5 rounded text-xs bg-yellow-600 text-white">
-                Reconnecting...
+              <span
+                className="shrink-0 pixel-mono px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+                style={{ background: '#ee9800', color: '#2a1700', border: '2px solid #ffb95f' }}
+              >
+                WS DISCONNECTED
               </span>
             )}
           </div>
           <button
-            onClick={handleGoToMeet}
-            className="px-4 py-2 rounded-lg bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white text-sm font-medium transition-colors"
+            type="button"
+            onClick={handleGoToActivity}
+            className="pixel-btn shrink-0 px-3 py-1.5 pixel-mono text-[10px] font-bold uppercase tracking-widest"
+            style={{
+              background: 'linear-gradient(180deg, #c0c1ff 0%, #8083ff 100%)',
+              color: '#1000a9',
+              borderBottom: '3px solid #494bd6',
+            }}
           >
-            Meet
+            Map
           </button>
-        </div>
+        </header>
 
-        {/* Messages area */}
-        <div className="flex-1 overflow-auto p-4 space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4" style={{ background: '#10141a' }}>
           {loadingMessages ? (
-            <div className="flex items-center justify-center h-full">
-              <span className="text-[var(--muted)]">Loading messages...</span>
+            <div className="flex h-full items-center justify-center">
+              <span className="pixel-mono text-xs uppercase tracking-widest text-[var(--muted)] animate-pulse">
+                Loading_log…
+              </span>
             </div>
           ) : currentMessages.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <p className="text-[var(--muted)]">No messages yet</p>
-                <p className="text-sm text-[var(--muted)]">
-                  Be the first to say something!
+            <div className="flex h-full items-center justify-center">
+              <div
+                className="max-w-sm p-8 text-center"
+                style={{
+                  background: '#0a0e14',
+                  border: '2px dashed #464554',
+                }}
+              >
+                <p className="pixel-mono text-xs uppercase tracking-widest text-[#c7c4d7]">
+                  &gt; NO_MESSAGES
+                </p>
+                <p className="mt-3 pixel-mono text-[10px] text-[#908fa0]">
+                  Open channel — type below to transmit
                 </p>
               </div>
             </div>
           ) : (
-            currentMessages.map((message) => {
-              const isSelf = user?.id === message.user_id;
-              return (
-                <div key={message.id} className="flex gap-3">
+            <div className="space-y-3">
+              {currentMessages.map((message) => {
+                const isSelf = user?.id === message.user_id;
+                return (
                   <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium ${
-                      isSelf ? 'bg-[var(--primary)]' : 'bg-[var(--border)]'
-                    }`}
+                    key={message.id}
+                    className="flex gap-3 border-2 p-2 sm:p-3"
+                    style={{
+                      borderColor: '#908fa0',
+                      background: isSelf ? 'rgba(192,193,255,0.12)' : '#1c2026',
+                    }}
                   >
-                    {message.display_name
-                      .split(' ')
-                      .map((n) => n[0])
-                      .join('')
-                      .toUpperCase()
-                      .slice(0, 2)}
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <span className="font-semibold text-sm">
-                        {message.display_name}
-                      </span>
-                      <span className="text-xs text-[var(--muted)]">
-                        {new Date(message.created_at).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
+                    <div
+                      className="flex h-10 w-10 shrink-0 items-center justify-center border-2 border-slate-950 text-xs font-bold"
+                      style={{
+                        background: isSelf ? 'var(--primary)' : '#334155',
+                        color: '#fff',
+                        fontFamily: "'Share Tech Mono', monospace",
+                      }}
+                    >
+                      {message.display_name
+                        .split(' ')
+                        .map((n) => n[0])
+                        .join('')
+                        .toUpperCase()
+                        .slice(0, 2)}
                     </div>
-                    <p className="text-sm mt-0.5">
-                      {renderMessageWithMentions(message.body, user?.id)}
-                    </p>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+                        <span className="pixel-mono text-xs font-bold uppercase tracking-wide text-[var(--secondary-lit)]">
+                          {message.display_name}
+                        </span>
+                        <span className="pixel-mono text-[10px] text-[var(--outline)]">
+                          {new Date(message.created_at).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                      <div className="pixel-mono text-sm leading-relaxed text-[var(--foreground)]">
+                        {renderMessageWithMentions(message.body, user?.id)}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           )}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Message input */}
-        <div className="p-4 border-t border-[var(--border)] bg-[var(--card)] relative">
-          {/* Mention autocomplete dropdown */}
+        <div
+          className="relative shrink-0 border-t-2 p-3 sm:p-4"
+          style={{ borderColor: '#464554', background: '#0a0e14' }}
+        >
           {showMentions && filteredMentionUsers.length > 0 && (
-            <div className="absolute bottom-full left-4 right-4 mb-2 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg max-h-48 overflow-auto">
+            <div
+              className="absolute bottom-full left-3 right-3 mb-2 max-h-48 overflow-y-auto border-2 shadow-lg sm:left-4 sm:right-4"
+              style={{
+                borderColor: 'var(--outline-dim)',
+                background: 'var(--surface-mid)',
+                boxShadow: '6px 6px 0 0 rgba(0,0,0,0.35)',
+              }}
+            >
               <div className="p-2">
-                <p className="text-xs text-[var(--muted)] px-2 py-1 mb-1">
-                  Tag someone — press ↑↓ to navigate, Enter or Tab to select
+                <p className="mb-2 px-2 pixel-mono text-[9px] uppercase tracking-wider text-[var(--muted)]">
+                  @mention — ↑↓ Enter Tab
                 </p>
                 {filteredMentionUsers.map((mentionUser, index) => (
                   <button
@@ -384,18 +432,19 @@ function ChatContent() {
                     type="button"
                     onClick={() => insertMention(mentionUser.display_name)}
                     onMouseEnter={() => setSelectedMentionIndex(index)}
-                    className={`w-full px-3 py-2 rounded-md flex items-center gap-3 transition-colors ${
-                      index === selectedMentionIndex
-                        ? 'bg-[var(--primary)] text-white'
-                        : 'hover:bg-[var(--card-hover)]'
-                    }`}
+                    className="flex w-full items-center gap-2 border-2 border-transparent px-2 py-2 text-left transition-colors"
+                    style={{
+                      background: index === selectedMentionIndex ? 'var(--primary)' : 'transparent',
+                      color: index === selectedMentionIndex ? '#fff' : 'var(--foreground)',
+                      borderColor: index === selectedMentionIndex ? '#312e81' : 'transparent',
+                    }}
                   >
                     <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${
-                        index === selectedMentionIndex
-                          ? 'bg-white/20'
-                          : 'bg-[var(--border)]'
-                      }`}
+                      className="flex h-8 w-8 shrink-0 items-center justify-center border-2 border-slate-950 text-[10px] font-bold"
+                      style={{
+                        background: index === selectedMentionIndex ? 'rgba(255,255,255,0.2)' : '#475569',
+                        color: '#fff',
+                      }}
                     >
                       {mentionUser.display_name
                         .split(' ')
@@ -404,40 +453,55 @@ function ChatContent() {
                         .toUpperCase()
                         .slice(0, 2)}
                     </div>
-                    <div className="flex-1 text-left">
-                      <span className="text-sm font-medium">
-                        {mentionUser.display_name}
-                      </span>
-                      {user?.id === mentionUser.user_id && (
-                        <span className="text-xs ml-2 opacity-70">(you)</span>
-                      )}
-                    </div>
-                    <span className="w-2 h-2 rounded-full bg-green-500"></span>
+                    <span className="pixel-mono text-xs uppercase tracking-wide">
+                      {mentionUser.display_name}
+                      {user?.id === mentionUser.user_id && ' (you)'}
+                    </span>
                   </button>
                 ))}
               </div>
             </div>
           )}
-          
-          <form onSubmit={handleSendMessage} className="flex gap-2">
-            <div className="flex-1 relative">
-              <input
-                ref={inputRef}
-                type="text"
-                value={messageInput}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                placeholder={`Message #${currentChannel} — Type @ to mention someone`}
-                className="w-full px-4 py-3 rounded-lg bg-[var(--background)] border border-[var(--border)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-                maxLength={1000}
-              />
-            </div>
+
+          <form
+            onSubmit={handleSendMessage}
+            className="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3"
+          >
+            <label className="flex min-w-0 flex-1 flex-col gap-1 sm:flex-row sm:items-center">
+              <span className="shrink-0 pixel-mono text-[10px] font-bold uppercase tracking-wider text-[#c7c4d7] sm:mr-1">
+                &gt; MSG:
+              </span>
+              <div className="relative min-w-0 flex-1">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={messageInput}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyDown}
+                  placeholder={`#${currentChannel} — @mention`}
+                  className="w-full px-3 py-2.5 pixel-mono text-sm text-[#dfe2eb] placeholder:text-[#908fa0] focus:border-b-2 focus:border-[#c0c1ff]"
+                  style={{
+                    background: '#0a0e14',
+                    border: '2px solid #464554',
+                    borderBottom: '2px solid #8083ff',
+                    borderRadius: 0,
+                    outline: 'none',
+                  }}
+                  maxLength={1000}
+                />
+              </div>
+            </label>
             <button
               type="submit"
               disabled={!messageInput.trim() || !isConnected}
-              className="px-6 py-3 rounded-lg bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white font-medium transition-colors disabled:opacity-50"
+              className="pixel-btn shrink-0 px-5 py-2.5 pixel-mono text-xs font-bold uppercase tracking-widest transition-[transform,border-bottom-width] duration-100 disabled:opacity-50 hover:border-b-[2px] active:translate-y-0.5 active:border-b-0"
+              style={{
+                background: 'linear-gradient(180deg, #c0c1ff 0%, #8083ff 100%)',
+                color: '#1000a9',
+                borderBottom: '4px solid #494bd6',
+              }}
             >
-              {isConnected ? 'Send' : 'Connecting...'}
+              {isConnected ? 'Send' : 'Wait…'}
             </button>
           </form>
         </div>

@@ -1,10 +1,22 @@
 'use client';
 
-import { createContext, useContext, useCallback, useEffect, useRef, ReactNode, useMemo } from 'react';
+import { createContext, useContext, useCallback, useEffect, useRef, useState, ReactNode } from 'react';
 import { useStore } from '@/store';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
-const WS_BASE = API_BASE.replace('http', 'ws');
+
+/** Build ws/wss origin from http(s) API base (replace('http','ws') breaks https:// → must use URL). */
+function apiBaseToWsOrigin(apiBase: string): string {
+  try {
+    const u = new URL(apiBase);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    return u.origin;
+  } catch {
+    return apiBase.replace(/^http/, 'ws');
+  }
+}
+
+const WS_BASE = apiBaseToWsOrigin(API_BASE);
 
 interface WsMessage {
   type: string;
@@ -97,6 +109,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
+  /** Bumps when we need to retry after an abnormal close (effect deps). */
+  const [wsReconnectTick, setWsReconnectTick] = useState(0);
   /** Queue ICE candidates until remote description is set (required for connection in many browsers) */
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   /** Offers received while A/V was disabled; process when user enables A/V */
@@ -353,6 +367,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             }
             break;
           }
+          case 'server.move.rejected': {
+            const payload = message.payload as { reason?: string };
+            console.warn('[Move] Rejected by server:', payload.reason ?? 'unknown');
+            break;
+          }
           case 'server.proximity': {
             const payload = message.payload as ProximityPayload;
             const currentUser = userRef.current;
@@ -527,6 +546,9 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     ]
   );
 
+  const handleMessageRef = useRef(handleMessage);
+  handleMessageRef.current = handleMessage;
+
   // When user enables A/V: create peer connections for proximity peers and process any offers we received while A/V was off
   useEffect(() => {
     const state = useStore.getState();
@@ -579,27 +601,19 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     });
   }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection, getWs, drainIceQueue]);
 
-  // Main connection effect
+  // Main connection effect (token + spaceId + wsReconnectTick; message handler via ref)
   useEffect(() => {
     if (!token || !spaceId) {
       console.log('[WebSocket] Missing token or spaceId, not connecting');
       return;
     }
-    
-    // Check if already connected or connecting
-    const existingWs = wsRef.current;
-    if (existingWs) {
-      const state = existingWs.readyState;
-      if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
-        console.log('[WebSocket] Already connected/connecting, skipping');
-        return;
-      }
-    }
-    
+
     if (isConnectingRef.current) {
       console.log('[WebSocket] Connection attempt already in progress');
       return;
     }
+
+    let cancelled = false;
 
     console.log('[WebSocket] Starting new connection to space:', spaceId);
     isConnectingRef.current = true;
@@ -609,13 +623,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     wsRef.current = socket;
 
     socket.onopen = () => {
+      if (cancelled) return;
       console.log('[WebSocket] Connected successfully');
       isConnectingRef.current = false;
       setWsConnected(true);
       setWs(socket);
     };
 
-    socket.onmessage = handleMessage;
+    socket.onmessage = (event: MessageEvent) => {
+      handleMessageRef.current(event);
+    };
 
     socket.onclose = (event) => {
       console.log('[WebSocket] Closed with code:', event.code, 'reason:', event.reason);
@@ -633,27 +650,30 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       pendingOffersRef.current.clear();
       clearPeerConnections();
 
-      // Only attempt reconnect for unexpected closures
-      if (event.code !== 1000 && event.code !== 1001) {
-        console.log('[WebSocket] Unexpected close, will attempt reconnect');
+      // Abnormal close (e.g. 1006): schedule reconnect by bumping tick so this effect re-runs
+      if (!cancelled && event.code !== 1000 && event.code !== 1001) {
+        console.log('[WebSocket] Unexpected close, scheduling reconnect in 2s');
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
         reconnectTimeoutRef.current = setTimeout(() => {
-          if (wsRef.current === null) {
-            isConnectingRef.current = false;
-            // The effect will re-run and create a new connection
+          if (!cancelled && wsRef.current === null) {
+            setWsReconnectTick((t) => t + 1);
           }
         }, 2000);
       }
     };
 
-    socket.onerror = (event) => {
-      console.error('[WebSocket] Error:', event);
+    socket.onerror = () => {
+      if (cancelled) return;
       isConnectingRef.current = false;
+      console.warn(
+        '[WebSocket] Connection error. Check NEXT_PUBLIC_API_BASE matches your API (HTTPS sites need https:// so WebSocket uses wss://), and that the server is reachable.'
+      );
     };
 
     return () => {
+      cancelled = true;
       console.log('[WebSocket] Cleanup triggered');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -670,7 +690,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       pendingOffersRef.current.clear();
       clearPeerConnections();
     };
-  }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);
+  }, [token, spaceId, wsReconnectTick, setWs, setWsConnected, clearPeerConnections]);
 
   // Get WebSocket from store for sending messages (more reliable than ref during remounts)
   const storeWs = useStore((state) => state.ws);

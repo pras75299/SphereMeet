@@ -57,6 +57,12 @@ async fn handle_socket(
     display_name: String,
     space_id: Uuid,
 ) {
+    // Cache map/zones before add_client so spawn positions use walkable tiles and avoid races
+    if let Err(e) = ensure_space_cached(&state, space_id).await {
+        tracing::error!("Failed to load space {} for join: {:?}", space_id, e);
+        return;
+    }
+
     let (mut sender, mut receiver) = socket.split();
     
     // Use bounded channel to prevent memory exhaustion from slow clients
@@ -236,6 +242,51 @@ async fn handle_socket(
     }
 }
 
+/// Load map and zones from DB and cache for movement validation. Call before `add_client` so spawn uses cached map.
+async fn ensure_space_cached(
+    state: &AppState,
+    space_id: Uuid,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _space = db::get_space(&state.pool, space_id)
+        .await?
+        .ok_or("Space not found")?;
+    let map = db::get_map_for_space(&state.pool, space_id).await?;
+    let zones = db::get_zones_for_space(&state.pool, space_id).await?;
+
+    if let Some(ref m) = map {
+        let blocked_set: HashSet<i32> = m
+            .blocked
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect())
+            .unwrap_or_default();
+
+        state
+            .cache_map_data(
+                space_id,
+                CachedMapData {
+                    width: m.width,
+                    height: m.height,
+                    blocked: blocked_set,
+                },
+            )
+            .await;
+    }
+
+    let cached_zones: Vec<CachedZone> = zones
+        .iter()
+        .map(|z| CachedZone {
+            id: z.id,
+            name: z.name.clone(),
+            x: z.x,
+            y: z.y,
+            w: z.w,
+            h: z.h,
+        })
+        .collect();
+    state.cache_zones(space_id, cached_zones).await;
+    Ok(())
+}
+
 async fn send_joined_message(
     state: &AppState,
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
@@ -243,13 +294,13 @@ async fn send_joined_message(
     display_name: &str,
     space_id: Uuid,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Get space details
+    // Map/zones already cached in ensure_space_cached; refresh cache idempotently from DB for joined payload
     let space = db::get_space(&state.pool, space_id).await?.ok_or("Space not found")?;
     let map = db::get_map_for_space(&state.pool, space_id).await?;
     let zones = db::get_zones_for_space(&state.pool, space_id).await?;
     let presence = state.get_presence_list(space_id).await;
 
-    // Cache map data for fast validation
+    // Cache map data for fast validation (idempotent with ensure_space_cached)
     if let Some(ref m) = map {
         let blocked_set: HashSet<i32> = m.blocked
             .as_array()
@@ -366,7 +417,18 @@ async fn handle_move(
     }
 
     // Validate move using cached data (no DB query!)
-    state.validate_move(space_id, x, y).await?;
+    if let Err(reason) = state.validate_move(space_id, x, y).await {
+        if let Some(sender) = state.get_client_sender(space_id, user_id).await {
+            let msg = WsMessage {
+                msg_type: "server.move.rejected".to_string(),
+                payload: json!({ "reason": reason }),
+            };
+            if let Ok(text) = serde_json::to_string(&msg) {
+                let _ = sender.try_send(text);
+            }
+        }
+        return Ok(());
+    }
 
     // Find zone using cached data (no DB query!)
     let zone_id = state.find_zone_for_position(space_id, x, y).await;

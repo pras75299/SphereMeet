@@ -98,6 +98,11 @@ async fn main() {
     tracing::info!("Running migrations...");
     db::run_migrations(&pool).await.expect("Failed to run migrations");
 
+    let main_office_id = db::ensure_main_office(&pool)
+        .await
+        .expect("Failed to ensure Main Office demo space");
+    tracing::info!(space_id = %main_office_id, "Main Office ready");
+
     let state = Arc::new(AppState::new(pool));
 
     let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());

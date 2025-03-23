@@ -20,6 +20,7 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
   const [seedingSpace, setSeedingSpace] = useState(false);
+  const [seedBanner, setSeedBanner] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     if (!isHydrated) hydrate();
@@ -51,16 +52,29 @@ export default function HomePage() {
     setLoading(true);
     setError("");
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      
       const res = await fetch(`${API_BASE}/api/auth/guest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: displayName.trim() }),
+        signal: controller.signal,
       });
-      if (!res.ok) throw new Error("Failed to create guest account");
+      
+      clearTimeout(timeoutId);
+      
+      if (res.status === 429) throw new Error("Rate limited. Please wait a moment.");
+      if (!res.ok) throw new Error("Failed to create guest account (" + res.status + ")");
+      
       const data = await res.json();
       setAuth(data.token, data.user);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        setError("Network timeout. The server is not responding.");
+      } else {
+        setError(err instanceof Error ? err.message : "Something went wrong");
+      }
     } finally {
       setLoading(false);
     }
@@ -68,11 +82,27 @@ export default function HomePage() {
 
   const handleSeedSpace = async () => {
     setSeedingSpace(true);
+    setSeedBanner(null);
     try {
       const res = await fetch(`${API_BASE}/api/dev/seed`, { method: "POST" });
-      if (res.ok) fetchSpaces();
-    } catch (err) {
-      console.error("Error seeding space:", err);
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.ok) {
+        setSeedBanner({
+          type: "ok",
+          text: "Main Office is ready. List refreshed.",
+        });
+        fetchSpaces();
+      } else {
+        setSeedBanner({
+          type: "err",
+          text: data.error || `Could not sync demo space (${res.status})`,
+        });
+      }
+    } catch {
+      setSeedBanner({
+        type: "err",
+        text: "Network error. Check NEXT_PUBLIC_API_BASE and that the API is running.",
+      });
     } finally {
       setSeedingSpace(false);
     }
@@ -199,7 +229,7 @@ export default function HomePage() {
               / SPACE_BROWSER
             </span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-3">
             <div
               className="pixel-frame px-3 py-1"
               style={{ background: "var(--surface-high)" }}
@@ -210,6 +240,7 @@ export default function HomePage() {
             </div>
             <button
               id="create-demo-space-btn"
+              type="button"
               onClick={handleSeedSpace}
               disabled={seedingSpace}
               className="pixel-btn px-4 py-2 pixel-mono text-xs uppercase tracking-widest disabled:opacity-50"
@@ -219,10 +250,28 @@ export default function HomePage() {
                 borderBottom: "4px solid var(--surface-low)",
               }}
             >
-              {seedingSpace ? "CREATING..." : "+ NEW SPACE"}
+              {seedingSpace ? "SYNCING..." : "ENSURE MAIN OFFICE"}
             </button>
           </div>
         </div>
+
+        {seedBanner && (
+          <div
+            className="mb-4 pixel-frame px-4 py-2 pixel-mono text-xs uppercase tracking-wider"
+            style={{
+              background:
+                seedBanner.type === "ok"
+                  ? "rgba(34, 197, 94, 0.12)"
+                  : "rgba(239, 68, 68, 0.12)",
+              borderColor:
+                seedBanner.type === "ok" ? "#22c55e" : "#ef4444",
+              color: seedBanner.type === "ok" ? "#86efac" : "#fca5a5",
+            }}
+          >
+            {seedBanner.type === "ok" ? "OK — " : "ERR — "}
+            {seedBanner.text}
+          </div>
+        )}
 
         {/* Section label */}
         <p className="pixel-mono text-xs text-[var(--muted)] uppercase tracking-widest mb-4">
@@ -237,7 +286,7 @@ export default function HomePage() {
           >
             <p className="pixel-mono text-sm text-[var(--muted)] mb-2">NO_SPACES_FOUND</p>
             <p className="pixel-mono text-xs text-[var(--outline)] uppercase tracking-widest">
-              Click &quot;+ NEW SPACE&quot; to initialize a demo floor
+              Main Office is created when the server starts — use &quot;ENSURE MAIN OFFICE&quot; to refresh the list
             </p>
           </div>
         ) : (

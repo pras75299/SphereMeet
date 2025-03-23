@@ -142,6 +142,40 @@ impl SpaceState {
     }
 }
 
+/// Pick a walkable tile not occupied by existing presence when map is cached; otherwise default.
+/// Prefers tiles near map center so users are not stuck in a corner with only two exits.
+fn pick_spawn_xy(space: &SpaceState) -> (i32, i32) {
+    let Some(map) = space.cached_map.as_ref() else {
+        return (5, 5);
+    };
+    let occupied: HashSet<(i32, i32)> = space.presence.iter().map(|(_, p)| (p.x, p.y)).collect();
+    let y_end = map.height.saturating_sub(1).max(1);
+    let x_end = map.width.saturating_sub(1).max(1);
+    let cx = map.width / 2;
+    let cy = map.height / 2;
+    let mut candidates: Vec<(i32, i32, i32)> = Vec::new();
+    for y in 1..y_end {
+        for x in 1..x_end {
+            let idx = y * map.width + x;
+            if map.blocked.contains(&idx) {
+                continue;
+            }
+            if occupied.contains(&(x, y)) {
+                continue;
+            }
+            let dx = x - cx;
+            let dy = y - cy;
+            let dist2 = dx * dx + dy * dy;
+            candidates.push((dist2, x, y));
+        }
+    }
+    candidates.sort_by_key(|(d2, _, _)| *d2);
+    if let Some((_, x, y)) = candidates.first() {
+        return (*x, *y);
+    }
+    (5, 5)
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub pool: PgPool,
@@ -166,8 +200,7 @@ impl AppState {
         let space_arc = self.spaces.entry(space_id).or_insert_with(|| Arc::new(RwLock::new(SpaceState::new()))).clone();
         let mut space = space_arc.write().await;
 
-        // Initial position
-        let (init_x, init_y) = (5, 5);
+        let (init_x, init_y) = pick_spawn_xy(&space);
 
         space.clients.insert(
             user_id,

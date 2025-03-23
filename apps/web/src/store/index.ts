@@ -168,7 +168,20 @@ export const useStore = create<AppState>((set, get) => ({
   // Map
   map: null,
   zones: [],
-  setMap: (map, zones) => set({ map, zones }),
+  setMap: (map, zones) => {
+    if (!map) {
+      set({ map: null, zones });
+      return;
+    }
+    // JSONB / serde may deserialize numbers as strings; normalize for .includes() checks
+    const blockedRaw = map.blocked;
+    const blocked = Array.isArray(blockedRaw)
+      ? blockedRaw
+          .map((n) => (typeof n === 'number' ? n : Number(n)))
+          .filter((n) => Number.isFinite(n))
+      : [];
+    set({ map: { ...map, blocked }, zones });
+  },
 
   // Presence
   presence: new Map(),

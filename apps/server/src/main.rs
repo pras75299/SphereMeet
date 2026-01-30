@@ -6,16 +6,52 @@ mod state;
 mod ws;
 
 use axum::{
+    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::signal;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::GovernorLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::state::AppState;
+
+/// Health check endpoint for load balancers
+async fn health_check() -> impl IntoResponse {
+    Json(json!({
+        "status": "ok",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+/// Readiness check - verifies database connection
+async fn readiness_check(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&state.pool).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "database": "connected"
+            })),
+        ),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "database": "disconnected"
+            })),
+        ),
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -48,22 +84,50 @@ async fn main() {
 
     let state = Arc::new(AppState::new(pool));
 
+    // Parse CORS origin with proper error handling
+    let cors_header = cors_origin.parse::<axum::http::HeaderValue>().unwrap_or_else(|e| {
+        tracing::error!("Invalid CORS_ORIGIN '{}': {:?}. Using default.", cors_origin, e);
+        "http://localhost:3000".parse().unwrap()
+    });
+
     let cors = CorsLayer::new()
-        .allow_origin(cors_origin.parse::<axum::http::HeaderValue>().unwrap())
+        .allow_origin(cors_header)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .allow_credentials(true);
+
+    // Rate limiting configuration
+    // Allow 100 requests per minute per IP for general endpoints
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_second(10)
+        .burst_size(100)
+        .finish()
+        .expect("Failed to create rate limiter config");
+
+    let governor_layer = GovernorLayer {
+        config: Arc::new(governor_conf),
+    };
+
+    // Build routes
+    let api_routes = Router::new()
+        // Auth - allow higher rate for login
+        .route("/auth/guest", post(handlers::auth::create_guest))
+        // Dev
+        .route("/dev/seed", post(handlers::dev::seed))
+        // Spaces
+        .route("/spaces", get(handlers::spaces::list_spaces))
+        .route("/spaces/:id", get(handlers::spaces::get_space))
+        // Chat
+        .route("/chat/:space_id", get(handlers::chat::get_messages))
+        .layer(governor_layer);
 
     let app = Router::new()
-        // Auth
-        .route("/api/auth/guest", post(handlers::auth::create_guest))
-        // Dev
-        .route("/api/dev/seed", post(handlers::dev::seed))
-        // Spaces
-        .route("/api/spaces", get(handlers::spaces::list_spaces))
-        .route("/api/spaces/:id", get(handlers::spaces::get_space))
-        // Chat
-        .route("/api/chat/:space_id", get(handlers::chat::get_messages))
-        // WebSocket
+        // Health check endpoints (no rate limiting)
+        .route("/health", get(health_check))
+        .route("/ready", get(readiness_check))
+        // API routes with rate limiting
+        .nest("/api", api_routes)
+        // WebSocket (no rate limiting on upgrade, but limited by connection count)
         .route("/ws", get(ws::ws_handler))
         .layer(cors)
         .with_state(state);
@@ -74,5 +138,40 @@ async fn main() {
 
     tracing::info!("Server listening on http://localhost:8080");
 
-    axum::serve(listener, app).await.expect("Server error");
+    // Graceful shutdown handling
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("Server error");
+
+    tracing::info!("Server shut down gracefully");
+}
+
+/// Handle shutdown signals for graceful shutdown
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C, starting graceful shutdown...");
+        }
+        _ = terminate => {
+            tracing::info!("Received SIGTERM, starting graceful shutdown...");
+        }
+    }
 }

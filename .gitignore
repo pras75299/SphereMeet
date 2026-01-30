@@ -1,29 +1,42 @@
 # Dependencies
+**/node_modules/
 node_modules/
 
 # Build outputs
+**/.next/
 .next/
+**/target/
 target/
+**/dist/
 dist/
+**/.turbo/
+.turbo/
 
 # Environment files
 .env
 .env.local
 .env*.local
+**/.env
+**/.env.local
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.cursor/
 
 # OS
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # Logs
 *.log
 npm-debug.log*
+
+# Rust build artifacts (but keep Cargo.lock)
+**/*.rs.bk
 
 # Misc
 *.pem

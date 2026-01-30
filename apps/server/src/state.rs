@@ -11,6 +11,12 @@ pub const HYSTERESIS_OUT_TILES: i32 = 5;
 pub const MAX_PROXIMITY_PEERS: usize = 6;
 pub const PROXIMITY_SIGNAL_GRACE_MS: u64 = 3000;
 
+// Bounded channel capacity
+pub const CHANNEL_CAPACITY: usize = 100;
+
+// Spatial grid cell size (should be >= HYSTERESIS_OUT_TILES for efficiency)
+const GRID_CELL_SIZE: i32 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPresence {
     pub user_id: Uuid,
@@ -27,7 +33,7 @@ pub struct ClientConnection {
     pub user_id: Uuid,
     pub display_name: String,
     pub space_id: Uuid,
-    pub sender: mpsc::UnboundedSender<String>,
+    pub sender: mpsc::Sender<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,11 +42,87 @@ pub struct ProximityEntry {
     pub last_updated: DateTime<Utc>,
 }
 
+/// Cached map data to avoid repeated DB queries
+#[derive(Debug, Clone)]
+pub struct CachedMapData {
+    pub width: i32,
+    pub height: i32,
+    pub blocked: HashSet<i32>,
+}
+
+/// Cached zone data
+#[derive(Debug, Clone)]
+pub struct CachedZone {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Spatial grid for O(1) proximity lookups
+#[derive(Debug, Default)]
+pub struct SpatialGrid {
+    cells: HashMap<(i32, i32), HashSet<Uuid>>,
+}
+
+impl SpatialGrid {
+    fn get_cell_coords(x: i32, y: i32) -> (i32, i32) {
+        (x / GRID_CELL_SIZE, y / GRID_CELL_SIZE)
+    }
+
+    pub fn insert(&mut self, user_id: Uuid, x: i32, y: i32) {
+        let cell = Self::get_cell_coords(x, y);
+        self.cells.entry(cell).or_default().insert(user_id);
+    }
+
+    pub fn remove(&mut self, user_id: Uuid, x: i32, y: i32) {
+        let cell = Self::get_cell_coords(x, y);
+        if let Some(users) = self.cells.get_mut(&cell) {
+            users.remove(&user_id);
+            if users.is_empty() {
+                self.cells.remove(&cell);
+            }
+        }
+    }
+
+    pub fn update(&mut self, user_id: Uuid, old_x: i32, old_y: i32, new_x: i32, new_y: i32) {
+        let old_cell = Self::get_cell_coords(old_x, old_y);
+        let new_cell = Self::get_cell_coords(new_x, new_y);
+
+        if old_cell != new_cell {
+            self.remove(user_id, old_x, old_y);
+            self.insert(user_id, new_x, new_y);
+        }
+    }
+
+    /// Get users in nearby cells (within proximity range)
+    pub fn get_nearby_users(&self, x: i32, y: i32) -> HashSet<Uuid> {
+        let (cx, cy) = Self::get_cell_coords(x, y);
+        let mut result = HashSet::new();
+
+        // Check current cell and all adjacent cells (3x3 grid)
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(users) = self.cells.get(&(cx + dx, cy + dy)) {
+                    result.extend(users.iter().copied());
+                }
+            }
+        }
+
+        result
+    }
+}
+
 #[derive(Debug)]
 pub struct SpaceState {
     pub clients: HashMap<Uuid, ClientConnection>,
     pub presence: HashMap<Uuid, UserPresence>,
     pub proximity_cache: HashMap<Uuid, ProximityEntry>,
+    pub spatial_grid: SpatialGrid,
+    pub cached_map: Option<CachedMapData>,
+    pub cached_zones: Vec<CachedZone>,
 }
 
 impl SpaceState {
@@ -49,6 +131,9 @@ impl SpaceState {
             clients: HashMap::new(),
             presence: HashMap::new(),
             proximity_cache: HashMap::new(),
+            spatial_grid: SpatialGrid::default(),
+            cached_map: None,
+            cached_zones: Vec::new(),
         }
     }
 }
@@ -72,10 +157,13 @@ impl AppState {
         space_id: Uuid,
         user_id: Uuid,
         display_name: String,
-        sender: mpsc::UnboundedSender<String>,
+        sender: mpsc::Sender<String>,
     ) {
         let mut spaces = self.spaces.write().await;
         let space = spaces.entry(space_id).or_insert_with(SpaceState::new);
+
+        // Initial position
+        let (init_x, init_y) = (5, 5);
 
         space.clients.insert(
             user_id,
@@ -93,25 +181,38 @@ impl AppState {
             UserPresence {
                 user_id,
                 display_name,
-                x: 5,
-                y: 5,
+                x: init_x,
+                y: init_y,
                 dir: "down".to_string(),
                 zone_id: None,
                 last_seen: Utc::now(),
             },
         );
+
+        // Add to spatial grid
+        space.spatial_grid.insert(user_id, init_x, init_y);
     }
 
     pub async fn remove_client(&self, space_id: Uuid, user_id: Uuid) {
         let mut spaces = self.spaces.write().await;
         if let Some(space) = spaces.get_mut(&space_id) {
+            // Get position before removal for spatial grid
+            if let Some(presence) = space.presence.get(&user_id) {
+                space.spatial_grid.remove(user_id, presence.x, presence.y);
+            }
+
             space.clients.remove(&user_id);
             space.presence.remove(&user_id);
             space.proximity_cache.remove(&user_id);
 
             // Remove this user from other users' proximity caches
-            for (_, entry) in space.proximity_cache.iter_mut() {
+            for entry in space.proximity_cache.values_mut() {
                 entry.peers.remove(&user_id);
+            }
+
+            // Clean up empty spaces to prevent memory leaks
+            if space.clients.is_empty() {
+                spaces.remove(&space_id);
             }
         }
     }
@@ -128,6 +229,11 @@ impl AppState {
         let mut spaces = self.spaces.write().await;
         if let Some(space) = spaces.get_mut(&space_id) {
             if let Some(presence) = space.presence.get_mut(&user_id) {
+                // Update spatial grid if position changed
+                if presence.x != x || presence.y != y {
+                    space.spatial_grid.update(user_id, presence.x, presence.y, x, y);
+                }
+
                 presence.x = x;
                 presence.y = y;
                 presence.dir = dir.to_string();
@@ -146,7 +252,7 @@ impl AppState {
         }
     }
 
-    pub async fn get_client_sender(&self, space_id: Uuid, user_id: Uuid) -> Option<mpsc::UnboundedSender<String>> {
+    pub async fn get_client_sender(&self, space_id: Uuid, user_id: Uuid) -> Option<mpsc::Sender<String>> {
         let spaces = self.spaces.read().await;
         if let Some(space) = spaces.get(&space_id) {
             space.clients.get(&user_id).map(|c| c.sender.clone())
@@ -160,12 +266,16 @@ impl AppState {
         if let Some(space) = spaces.get(&space_id) {
             for (uid, client) in &space.clients {
                 if exclude_user.map_or(true, |exc| exc != *uid) {
-                    let _ = client.sender.send(message.to_string());
+                    // Use try_send to avoid blocking on slow clients
+                    if let Err(e) = client.sender.try_send(message.to_string()) {
+                        tracing::warn!("Failed to send message to client {}: {:?}", uid, e);
+                    }
                 }
             }
         }
     }
 
+    /// Compute proximity using spatial grid for O(k) instead of O(n²)
     pub async fn compute_proximity(&self, space_id: Uuid) -> HashMap<Uuid, HashSet<Uuid>> {
         let mut spaces = self.spaces.write().await;
         let space = match spaces.get_mut(&space_id) {
@@ -173,41 +283,46 @@ impl AppState {
             None => return HashMap::new(),
         };
 
-        let users: Vec<(Uuid, i32, i32)> = space
+        let mut new_proximity: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+
+        // For each user, find nearby users using spatial grid
+        let user_positions: Vec<(Uuid, i32, i32)> = space
             .presence
             .iter()
             .map(|(id, p)| (*id, p.x, p.y))
             .collect();
 
-        let mut new_proximity: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
-
-        for (user_id, x1, y1) in &users {
+        for (user_id, x1, y1) in &user_positions {
+            // Get potential nearby users from spatial grid
+            let candidates = space.spatial_grid.get_nearby_users(*x1, *y1);
             let mut distances: Vec<(Uuid, f64)> = Vec::new();
 
-            for (other_id, x2, y2) in &users {
-                if user_id == other_id {
+            for other_id in candidates {
+                if other_id == *user_id {
                     continue;
                 }
 
-                let dx = (*x2 - *x1) as f64;
-                let dy = (*y2 - *y1) as f64;
-                let dist = (dx * dx + dy * dy).sqrt();
+                if let Some(other_presence) = space.presence.get(&other_id) {
+                    let dx = (other_presence.x - *x1) as f64;
+                    let dy = (other_presence.y - *y1) as f64;
+                    let dist = (dx * dx + dy * dy).sqrt();
 
-                // Check if peer was previously in proximity
-                let was_in_proximity = space
-                    .proximity_cache
-                    .get(user_id)
-                    .map_or(false, |entry| entry.peers.contains(other_id));
+                    // Check if peer was previously in proximity
+                    let was_in_proximity = space
+                        .proximity_cache
+                        .get(user_id)
+                        .map_or(false, |entry| entry.peers.contains(&other_id));
 
-                // Hysteresis: enter at RADIUS_TILES, exit at HYSTERESIS_OUT_TILES
-                let in_range = if was_in_proximity {
-                    dist <= HYSTERESIS_OUT_TILES as f64
-                } else {
-                    dist <= RADIUS_TILES as f64
-                };
+                    // Hysteresis: enter at RADIUS_TILES, exit at HYSTERESIS_OUT_TILES
+                    let in_range = if was_in_proximity {
+                        dist <= HYSTERESIS_OUT_TILES as f64
+                    } else {
+                        dist <= RADIUS_TILES as f64
+                    };
 
-                if in_range {
-                    distances.push((*other_id, dist));
+                    if in_range {
+                        distances.push((other_id, dist));
+                    }
                 }
             }
 
@@ -272,5 +387,75 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    /// Cache map data for a space
+    pub async fn cache_map_data(&self, space_id: Uuid, map: CachedMapData) {
+        let mut spaces = self.spaces.write().await;
+        if let Some(space) = spaces.get_mut(&space_id) {
+            space.cached_map = Some(map);
+        }
+    }
+
+    /// Cache zones for a space
+    pub async fn cache_zones(&self, space_id: Uuid, zones: Vec<CachedZone>) {
+        let mut spaces = self.spaces.write().await;
+        if let Some(space) = spaces.get_mut(&space_id) {
+            space.cached_zones = zones;
+        }
+    }
+
+    /// Get cached map data
+    pub async fn get_cached_map(&self, space_id: Uuid) -> Option<CachedMapData> {
+        let spaces = self.spaces.read().await;
+        spaces.get(&space_id).and_then(|s| s.cached_map.clone())
+    }
+
+    /// Get cached zones
+    pub async fn get_cached_zones(&self, space_id: Uuid) -> Vec<CachedZone> {
+        let spaces = self.spaces.read().await;
+        spaces
+            .get(&space_id)
+            .map(|s| s.cached_zones.clone())
+            .unwrap_or_default()
+    }
+
+    /// Validate move against cached map data
+    /// Returns error if space doesn't exist, map is not cached, or position is invalid
+    pub async fn validate_move(&self, space_id: Uuid, x: i32, y: i32) -> Result<(), &'static str> {
+        let spaces = self.spaces.read().await;
+        
+        // Fail if space doesn't exist
+        let space = spaces.get(&space_id).ok_or("Space not found")?;
+        
+        // Fail if map is not cached - this means the space setup is incomplete
+        // The map should always be cached when a user joins via send_joined_message
+        let map = space.cached_map.as_ref().ok_or("Map data not available")?;
+        
+        // Check bounds
+        if x < 0 || x >= map.width || y < 0 || y >= map.height {
+            return Err("Position out of bounds");
+        }
+
+        // Check blocked tiles
+        let tile_index = y * map.width + x;
+        if map.blocked.contains(&tile_index) {
+            return Err("Position is blocked");
+        }
+        
+        Ok(())
+    }
+
+    /// Find zone for position using cached data
+    pub async fn find_zone_for_position(&self, space_id: Uuid, x: i32, y: i32) -> Option<Uuid> {
+        let spaces = self.spaces.read().await;
+        if let Some(space) = spaces.get(&space_id) {
+            for zone in &space.cached_zones {
+                if x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h {
+                    return Some(zone.id);
+                }
+            }
+        }
+        None
     }
 }

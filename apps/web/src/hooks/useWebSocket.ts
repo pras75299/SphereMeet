@@ -6,6 +6,11 @@ import { useStore, UserPresence, ChatMessage } from '@/store';
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 const WS_BASE = API_BASE.replace('http', 'ws');
 
+// Reconnection constants
+const INITIAL_RECONNECT_DELAY = 1000; // 1 second
+const MAX_RECONNECT_DELAY = 30000; // 30 seconds
+const MAX_RECONNECT_ATTEMPTS = 10;
+
 interface WsMessage {
   type: string;
   payload: unknown;
@@ -91,10 +96,13 @@ export function useWebSocket(spaceId: string | null) {
     setPeerConnection,
     updatePeerStream,
     removePeerConnection,
+    clearPeerConnections,
   } = useStore();
 
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
 
   const createPeerConnection = useCallback(
     (peerId: string, isInitiator: boolean) => {
@@ -277,6 +285,9 @@ export function useWebSocket(spaceId: string | null) {
       console.log('WebSocket connected');
       setWsConnected(true);
       setWs(socket);
+      // Reset reconnection state on successful connection
+      reconnectAttemptsRef.current = 0;
+      reconnectDelayRef.current = INITIAL_RECONNECT_DELAY;
     };
 
     socket.onmessage = (event) => {
@@ -363,19 +374,37 @@ export function useWebSocket(spaceId: string | null) {
       }
     };
 
-    socket.onclose = () => {
-      console.log('WebSocket disconnected');
+    socket.onclose = (event) => {
+      console.log('WebSocket disconnected', event.code, event.reason);
       setWsConnected(false);
       setWs(null);
       wsRef.current = null;
 
-      // Reconnect after 2 seconds
+      // Clean up peer connections on disconnect
+      clearPeerConnections();
+
+      // Clear any existing reconnect timeout
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
+
+      // Check if we should attempt to reconnect
+      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+        console.error('Max reconnection attempts reached. Please refresh the page.');
+        return;
+      }
+
+      // Exponential backoff with jitter
+      const jitter = Math.random() * 1000;
+      const delay = Math.min(reconnectDelayRef.current + jitter, MAX_RECONNECT_DELAY);
+      
+      console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+      
       reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectAttemptsRef.current += 1;
+        reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, MAX_RECONNECT_DELAY);
         connect();
-      }, 2000);
+      }, delay);
     };
 
     socket.onerror = (error) => {
@@ -404,14 +433,20 @@ export function useWebSocket(spaceId: string | null) {
     }
 
     return () => {
+      // Clear reconnection timeout
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
+      // Close WebSocket
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
+      // Clean up all peer connections
+      clearPeerConnections();
     };
-  }, [token, spaceId, ws, connect]);
+  }, [token, spaceId, ws, connect, clearPeerConnections]);
 
   const sendMessage = useCallback(
     (type: string, payload: unknown) => {

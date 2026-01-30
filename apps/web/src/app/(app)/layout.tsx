@@ -1,14 +1,21 @@
 'use client';
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, Suspense } from 'react';
+import { useEffect, Suspense, useCallback } from 'react';
 import { useStore } from '@/store';
 
 function NavContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { token, user, spaceName, clearAuth, isHydrated, hydrate } = useStore();
+
+  // Use individual selectors to prevent re-renders
+  const token = useStore((state) => state.token);
+  const user = useStore((state) => state.user);
+  const spaceName = useStore((state) => state.spaceName);
+  const clearAuth = useStore((state) => state.clearAuth);
+  const isHydrated = useStore((state) => state.isHydrated);
+  const hydrate = useStore((state) => state.hydrate);
 
   const spaceId = searchParams.get('space');
 
@@ -31,10 +38,10 @@ function NavContent({ children }: { children: React.ReactNode }) {
     { name: 'Activity', href: `/activity?space=${spaceId}` },
   ];
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     clearAuth();
     router.push('/');
-  };
+  }, [clearAuth, router]);
 
   // Show loading while hydrating or if not authenticated
   if (!isHydrated || !token || !user) {

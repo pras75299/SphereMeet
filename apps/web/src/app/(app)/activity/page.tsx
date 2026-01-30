@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useCallback, Suspense } from 'react';
+import { useEffect, useRef, useCallback, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -12,30 +12,36 @@ function ActivityContent() {
   const spaceId = searchParams.get('space');
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const {
-    user,
-    map,
-    zones,
-    presence,
-    proximityPeers,
-    nearbyAvEnabled,
-    setNearbyAvEnabled,
-    localStream,
-    setLocalStream,
-    peerConnections,
-    clearPeerConnections,
-  } = useStore();
+  // Use individual selectors to prevent unnecessary re-renders
+  const user = useStore((state) => state.user);
+  const map = useStore((state) => state.map);
+  const zones = useStore((state) => state.zones);
+  const presence = useStore((state) => state.presence);
+  const proximityPeers = useStore((state) => state.proximityPeers);
+  const nearbyAvEnabled = useStore((state) => state.nearbyAvEnabled);
+  const setNearbyAvEnabled = useStore((state) => state.setNearbyAvEnabled);
+  const localStream = useStore((state) => state.localStream);
+  const setLocalStream = useStore((state) => state.setLocalStream);
+  const peerConnections = useStore((state) => state.peerConnections);
+  const clearPeerConnections = useStore((state) => state.clearPeerConnections);
 
   const { sendMove } = useWebSocket(spaceId);
 
-  // Get current user's presence
-  const selfPresence = user ? presence.get(user.id) : null;
+  // Get current user's presence - memoized to prevent recalculation
+  const selfPresence = useMemo(() => {
+    return user ? presence.get(user.id) : null;
+  }, [user, presence]);
 
   // Handle keyboard movement
   useEffect(() => {
     if (!map || !user || !selfPresence) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Prevent handling if user is typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
       let newX = selfPresence.x;
       let newY = selfPresence.y;
       let dir = selfPresence.dir;
@@ -68,6 +74,8 @@ function ActivityContent() {
         default:
           return;
       }
+
+      e.preventDefault();
 
       // Validate bounds
       if (newX < 0 || newX >= map.width || newY < 0 || newY >= map.height) {
@@ -244,19 +252,6 @@ function ActivityContent() {
     clearPeerConnections();
     setNearbyAvEnabled(false);
   }, [localStream, setLocalStream, clearPeerConnections, setNearbyAvEnabled]);
-
-  // Get nearby peers with their streams
-  const nearbyPeersWithStreams = proximityPeers
-    .map((peerId) => {
-      const peerPresence = presence.get(peerId);
-      const peerConnection = peerConnections.get(peerId);
-      return {
-        id: peerId,
-        name: peerPresence?.display_name || 'Unknown',
-        stream: peerConnection?.remoteStream || null,
-      };
-    })
-    .filter((peer) => peer.stream);
 
   return (
     <div className="h-[calc(100vh-60px)] flex">

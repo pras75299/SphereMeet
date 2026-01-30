@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback, Suspense } from 'react';
+import { useEffect, useState, useRef, useCallback, Suspense, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -22,15 +22,14 @@ function ChatContent() {
   const [messageInput, setMessageInput] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(false);
 
-  const {
-    token,
-    user,
-    chatMessages,
-    currentChannel,
-    setCurrentChannel,
-    setChatMessages,
-    presence,
-  } = useStore();
+  // Use individual selectors to prevent re-renders
+  const token = useStore((state) => state.token);
+  const user = useStore((state) => state.user);
+  const chatMessages = useStore((state) => state.chatMessages);
+  const currentChannel = useStore((state) => state.currentChannel);
+  const setCurrentChannel = useStore((state) => state.setCurrentChannel);
+  const setChatMessages = useStore((state) => state.setChatMessages);
+  const presence = useStore((state) => state.presence);
 
   const { sendChat } = useWebSocket(spaceId);
 
@@ -64,28 +63,33 @@ function ChatContent() {
   }, [fetchMessages]);
 
   // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const currentMessages = useMemo(() => {
+    return chatMessages.get(currentChannel) || [];
   }, [chatMessages, currentChannel]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [currentMessages]);
+
+  const handleSendMessage = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (!messageInput.trim()) return;
 
     sendChat(currentChannel, messageInput.trim());
     setMessageInput('');
-  };
+  }, [messageInput, currentChannel, sendChat]);
 
-  const handleChannelChange = (channelId: string) => {
+  const handleChannelChange = useCallback((channelId: string) => {
     setCurrentChannel(channelId);
-  };
+  }, [setCurrentChannel]);
 
-  const handleGoToMeet = () => {
+  const handleGoToMeet = useCallback(() => {
     router.push(`/activity?space=${spaceId}`);
-  };
+  }, [router, spaceId]);
 
-  const currentMessages = chatMessages.get(currentChannel) || [];
-  const onlineUsers = Array.from(presence.values());
+  const onlineUsers = useMemo(() => {
+    return Array.from(presence.values());
+  }, [presence]);
 
   return (
     <div className="h-[calc(100vh-60px)] flex">

@@ -1,15 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
-import { useStore, UserPresence, ChatMessage } from '@/store';
+import { useStore } from '@/store';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 const WS_BASE = API_BASE.replace('http', 'ws');
-
-// Reconnection constants
-const INITIAL_RECONNECT_DELAY = 1000; // 1 second
-const MAX_RECONNECT_DELAY = 30000; // 30 seconds
-const MAX_RECONNECT_ATTEMPTS = 10;
 
 interface WsMessage {
   type: string;
@@ -77,44 +72,60 @@ interface WebRTCSignalPayload {
 }
 
 export function useWebSocket(spaceId: string | null) {
-  const {
-    token,
-    user,
-    setSpace,
-    setMap,
-    setPresence,
-    updatePresence,
-    removePresence,
-    setProximityPeers,
-    addChatMessage,
-    ws,
-    setWs,
-    setWsConnected,
-    nearbyAvEnabled,
-    localStream,
-    peerConnections,
-    setPeerConnection,
-    updatePeerStream,
-    removePeerConnection,
-    clearPeerConnections,
-  } = useStore();
-
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const reconnectDelayRef = useRef(INITIAL_RECONNECT_DELAY);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isConnectingRef = useRef(false);
+
+  // Get stable references to store functions (they don't change)
+  const token = useStore((state) => state.token);
+  const user = useStore((state) => state.user);
+  const setSpace = useStore((state) => state.setSpace);
+  const setMap = useStore((state) => state.setMap);
+  const setPresence = useStore((state) => state.setPresence);
+  const updatePresence = useStore((state) => state.updatePresence);
+  const removePresence = useStore((state) => state.removePresence);
+  const setProximityPeers = useStore((state) => state.setProximityPeers);
+  const addChatMessage = useStore((state) => state.addChatMessage);
+  const setWs = useStore((state) => state.setWs);
+  const setWsConnected = useStore((state) => state.setWsConnected);
+  const nearbyAvEnabled = useStore((state) => state.nearbyAvEnabled);
+  const localStream = useStore((state) => state.localStream);
+  const setPeerConnection = useStore((state) => state.setPeerConnection);
+  const updatePeerStream = useStore((state) => state.updatePeerStream);
+  const removePeerConnection = useStore((state) => state.removePeerConnection);
+  const clearPeerConnections = useStore((state) => state.clearPeerConnections);
+
+  // Use refs to access current values in callbacks without causing re-renders
+  const userRef = useRef(user);
+  const nearbyAvEnabledRef = useRef(nearbyAvEnabled);
+  const localStreamRef = useRef(localStream);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  useEffect(() => {
+    nearbyAvEnabledRef.current = nearbyAvEnabled;
+  }, [nearbyAvEnabled]);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
 
   const createPeerConnection = useCallback(
-    (peerId: string, isInitiator: boolean) => {
-      if (!user || !ws || !localStream) return null;
+    (peerId: string, isInitiator: boolean): RTCPeerConnection | null => {
+      const currentUser = userRef.current;
+      const currentLocalStream = localStreamRef.current;
+      
+      if (!currentUser || !currentLocalStream) return null;
 
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       });
 
       // Add local tracks
-      localStream.getTracks().forEach((track) => {
-        pc.addTrack(track, localStream);
+      currentLocalStream.getTracks().forEach((track) => {
+        pc.addTrack(track, currentLocalStream);
       });
 
       // Handle ICE candidates
@@ -164,133 +175,11 @@ export function useWebSocket(spaceId: string | null) {
 
       return pc;
     },
-    [user, localStream, setPeerConnection, updatePeerStream]
+    [setPeerConnection, updatePeerStream]
   );
 
-  const handleProximityUpdate = useCallback(
-    (peers: string[]) => {
-      if (!user || !nearbyAvEnabled || !localStream) {
-        setProximityPeers(peers);
-        return;
-      }
-
-      const desiredPeers = new Set(peers);
-      const currentPeers = new Set(peerConnections.keys());
-
-      // Connect to new peers
-      desiredPeers.forEach((peerId) => {
-        if (!currentPeers.has(peerId)) {
-          // Determine who initiates (lower user_id string initiates)
-          const isInitiator = user.id < peerId;
-          createPeerConnection(peerId, isInitiator);
-        }
-      });
-
-      // Disconnect from peers no longer in range
-      currentPeers.forEach((peerId) => {
-        if (!desiredPeers.has(peerId)) {
-          removePeerConnection(peerId);
-        }
-      });
-
-      setProximityPeers(peers);
-    },
-    [user, nearbyAvEnabled, localStream, peerConnections, createPeerConnection, removePeerConnection, setProximityPeers]
-  );
-
-  const handleWebRTCOffer = useCallback(
-    async (payload: WebRTCSignalPayload) => {
-      if (!user || !nearbyAvEnabled || !localStream) return;
-
-      const { from_user_id, sdp } = payload;
-      if (!sdp) return;
-
-      let peerConn = peerConnections.get(from_user_id);
-      let pc: RTCPeerConnection;
-
-      if (!peerConn) {
-        // Create new peer connection (we received an offer, so we're not initiator)
-        const newPc = createPeerConnection(from_user_id, false);
-        if (!newPc) return;
-        pc = newPc;
-      } else {
-        pc = peerConn.pc;
-      }
-
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'client.webrtc.answer',
-              payload: {
-                to_user_id: from_user_id,
-                sdp: pc.localDescription?.sdp,
-              },
-            })
-          );
-        }
-      } catch (err) {
-        console.error('Error handling offer:', err);
-      }
-    },
-    [user, nearbyAvEnabled, localStream, peerConnections, createPeerConnection]
-  );
-
-  const handleWebRTCAnswer = useCallback(
-    async (payload: WebRTCSignalPayload) => {
-      const { from_user_id, sdp } = payload;
-      if (!sdp) return;
-
-      const peerConn = peerConnections.get(from_user_id);
-      if (!peerConn) return;
-
-      try {
-        await peerConn.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-      } catch (err) {
-        console.error('Error handling answer:', err);
-      }
-    },
-    [peerConnections]
-  );
-
-  const handleWebRTCIce = useCallback(
-    async (payload: WebRTCSignalPayload) => {
-      const { from_user_id, candidate } = payload;
-      if (!candidate) return;
-
-      const peerConn = peerConnections.get(from_user_id);
-      if (!peerConn) return;
-
-      try {
-        await peerConn.pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error('Error adding ICE candidate:', err);
-      }
-    },
-    [peerConnections]
-  );
-
-  const connect = useCallback(() => {
-    if (!token || !spaceId) return;
-
-    const wsUrl = `${WS_BASE}/ws?token=${encodeURIComponent(token)}&space_id=${spaceId}`;
-    const socket = new WebSocket(wsUrl);
-    wsRef.current = socket;
-
-    socket.onopen = () => {
-      console.log('WebSocket connected');
-      setWsConnected(true);
-      setWs(socket);
-      // Reset reconnection state on successful connection
-      reconnectAttemptsRef.current = 0;
-      reconnectDelayRef.current = INITIAL_RECONNECT_DELAY;
-    };
-
-    socket.onmessage = (event) => {
+  const handleMessage = useCallback(
+    (event: MessageEvent) => {
       try {
         const message: WsMessage = JSON.parse(event.data);
 
@@ -341,7 +230,33 @@ export function useWebSocket(spaceId: string | null) {
           }
           case 'server.proximity': {
             const payload = message.payload as ProximityPayload;
-            handleProximityUpdate(payload.peers);
+            const currentUser = userRef.current;
+            const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
+            const currentLocalStream = localStreamRef.current;
+
+            // Always update proximity peers list
+            setProximityPeers(payload.peers);
+
+            // Only manage WebRTC connections if A/V is enabled
+            if (currentUser && currentNearbyAvEnabled && currentLocalStream) {
+              const desiredPeers = new Set(payload.peers);
+              const currentPeers = new Set(useStore.getState().peerConnections.keys());
+
+              // Connect to new peers
+              desiredPeers.forEach((peerId) => {
+                if (!currentPeers.has(peerId)) {
+                  const isInitiator = currentUser.id < peerId;
+                  createPeerConnection(peerId, isInitiator);
+                }
+              });
+
+              // Disconnect from peers no longer in range
+              currentPeers.forEach((peerId) => {
+                if (!desiredPeers.has(peerId)) {
+                  removePeerConnection(peerId);
+                }
+              });
+            }
             break;
           }
           case 'server.chat.new': {
@@ -357,25 +272,112 @@ export function useWebSocket(spaceId: string | null) {
             break;
           }
           case 'server.webrtc.offer': {
-            handleWebRTCOffer(message.payload as WebRTCSignalPayload);
+            const payload = message.payload as WebRTCSignalPayload;
+            const currentUser = userRef.current;
+            const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
+            const currentLocalStream = localStreamRef.current;
+
+            if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) return;
+            if (!payload.sdp) return;
+
+            const peerConnections = useStore.getState().peerConnections;
+            let peerConn = peerConnections.get(payload.from_user_id);
+            let pc: RTCPeerConnection;
+
+            if (!peerConn) {
+              const newPc = createPeerConnection(payload.from_user_id, false);
+              if (!newPc) return;
+              pc = newPc;
+            } else {
+              pc = peerConn.pc;
+            }
+
+            pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }))
+              .then(() => pc.createAnswer())
+              .then((answer) => pc.setLocalDescription(answer))
+              .then(() => {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(
+                    JSON.stringify({
+                      type: 'client.webrtc.answer',
+                      payload: {
+                        to_user_id: payload.from_user_id,
+                        sdp: pc.localDescription?.sdp,
+                      },
+                    })
+                  );
+                }
+              })
+              .catch((err) => console.error('Error handling offer:', err));
             break;
           }
           case 'server.webrtc.answer': {
-            handleWebRTCAnswer(message.payload as WebRTCSignalPayload);
+            const payload = message.payload as WebRTCSignalPayload;
+            if (!payload.sdp) return;
+
+            const peerConnections = useStore.getState().peerConnections;
+            const peerConn = peerConnections.get(payload.from_user_id);
+            if (!peerConn) return;
+
+            peerConn.pc
+              .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
+              .catch((err) => console.error('Error handling answer:', err));
             break;
           }
           case 'server.webrtc.ice': {
-            handleWebRTCIce(message.payload as WebRTCSignalPayload);
+            const payload = message.payload as WebRTCSignalPayload;
+            if (!payload.candidate) return;
+
+            const peerConnections = useStore.getState().peerConnections;
+            const peerConn = peerConnections.get(payload.from_user_id);
+            if (!peerConn) return;
+
+            peerConn.pc
+              .addIceCandidate(new RTCIceCandidate(payload.candidate))
+              .catch((err) => console.error('Error adding ICE candidate:', err));
             break;
           }
         }
       } catch (err) {
         console.error('Error parsing WebSocket message:', err);
       }
+    },
+    [
+      setSpace,
+      setMap,
+      setPresence,
+      updatePresence,
+      removePresence,
+      setProximityPeers,
+      addChatMessage,
+      createPeerConnection,
+      removePeerConnection,
+    ]
+  );
+
+  // Main connection effect
+  useEffect(() => {
+    if (!token || !spaceId) return;
+    if (wsRef.current || isConnectingRef.current) return;
+
+    isConnectingRef.current = true;
+
+    const wsUrl = `${WS_BASE}/ws?token=${encodeURIComponent(token)}&space_id=${spaceId}`;
+    const socket = new WebSocket(wsUrl);
+    wsRef.current = socket;
+
+    socket.onopen = () => {
+      console.log('WebSocket connected');
+      isConnectingRef.current = false;
+      setWsConnected(true);
+      setWs(socket);
     };
+
+    socket.onmessage = handleMessage;
 
     socket.onclose = (event) => {
       console.log('WebSocket disconnected', event.code, event.reason);
+      isConnectingRef.current = false;
       setWsConnected(false);
       setWs(null);
       wsRef.current = null;
@@ -383,79 +385,42 @@ export function useWebSocket(spaceId: string | null) {
       // Clean up peer connections on disconnect
       clearPeerConnections();
 
-      // Clear any existing reconnect timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      // Reconnect after 2 seconds if not a clean close
+      if (event.code !== 1000) {
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        reconnectTimeoutRef.current = setTimeout(() => {
+          // Trigger reconnect by updating a ref that causes useEffect to re-run
+          wsRef.current = null;
+        }, 2000);
       }
-
-      // Check if we should attempt to reconnect
-      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-        console.error('Max reconnection attempts reached. Please refresh the page.');
-        return;
-      }
-
-      // Exponential backoff with jitter
-      const jitter = Math.random() * 1000;
-      const delay = Math.min(reconnectDelayRef.current + jitter, MAX_RECONNECT_DELAY);
-      
-      console.log(`Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})`);
-      
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectAttemptsRef.current += 1;
-        reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, MAX_RECONNECT_DELAY);
-        connect();
-      }, delay);
     };
 
     socket.onerror = (error) => {
       console.error('WebSocket error:', error);
+      isConnectingRef.current = false;
     };
-  }, [
-    token,
-    spaceId,
-    setWs,
-    setWsConnected,
-    setSpace,
-    setMap,
-    setPresence,
-    updatePresence,
-    removePresence,
-    addChatMessage,
-    handleProximityUpdate,
-    handleWebRTCOffer,
-    handleWebRTCAnswer,
-    handleWebRTCIce,
-  ]);
-
-  useEffect(() => {
-    if (token && spaceId && !ws) {
-      connect();
-    }
 
     return () => {
-      // Clear reconnection timeout
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
-      // Close WebSocket
       if (wsRef.current) {
-        wsRef.current.close();
+        wsRef.current.close(1000, 'Component unmounting');
         wsRef.current = null;
       }
-      // Clean up all peer connections
+      isConnectingRef.current = false;
       clearPeerConnections();
     };
-  }, [token, spaceId, ws, connect, clearPeerConnections]);
+  }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);
 
-  const sendMessage = useCallback(
-    (type: string, payload: unknown) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type, payload }));
-      }
-    },
-    []
-  );
+  const sendMessage = useCallback((type: string, payload: unknown) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, payload }));
+    }
+  }, []);
 
   const sendMove = useCallback(
     (x: number, y: number, dir: string) => {

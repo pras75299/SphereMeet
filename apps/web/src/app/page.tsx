@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useStore } from '@/store';
 
@@ -8,7 +8,19 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 
 export default function HomePage() {
   const router = useRouter();
-  const { token, user, setAuth, isHydrated, hydrate } = useStore();
+  
+  // Use individual selectors to prevent re-renders
+  const token = useStore((state) => state.token);
+  const user = useStore((state) => state.user);
+  const setAuth = useStore((state) => state.setAuth);
+  const isHydrated = useStore((state) => state.isHydrated);
+  const hydrate = useStore((state) => state.hydrate);
+
+  const [displayName, setDisplayName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [seedingSpace, setSeedingSpace] = useState(false);
 
   // Hydrate store from localStorage on mount
   useEffect(() => {
@@ -16,25 +28,14 @@ export default function HomePage() {
       hydrate();
     }
   }, [isHydrated, hydrate]);
-  const [displayName, setDisplayName] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
-  const [seedingSpace, setSeedingSpace] = useState(false);
 
-  useEffect(() => {
-    if (token && user) {
-      fetchSpaces();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, user]);
-
-  const fetchSpaces = async () => {
-    if (!token) return;
+  const fetchSpaces = useCallback(async () => {
+    const currentToken = useStore.getState().token;
+    if (!currentToken) return;
     try {
       const res = await fetch(`${API_BASE}/api/spaces`, {
         headers: {
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${currentToken}`,
         },
       });
       if (res.ok) {
@@ -44,7 +45,13 @@ export default function HomePage() {
     } catch (err) {
       console.error('Error fetching spaces:', err);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (token && user) {
+      fetchSpaces();
+    }
+  }, [token, user, fetchSpaces]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,7 +76,6 @@ export default function HomePage() {
 
       const data = await res.json();
       setAuth(data.token, data.user);
-      fetchSpaces();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {

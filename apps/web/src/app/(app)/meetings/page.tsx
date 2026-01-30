@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, Suspense } from 'react';
+import { useEffect, useState, useCallback, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -13,7 +13,10 @@ function MeetingsContent() {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
 
-  const { user, presence, peerConnections } = useStore();
+  // Use individual selectors to prevent re-renders
+  const user = useStore((state) => state.user);
+  const presence = useStore((state) => state.presence);
+  const peerConnections = useStore((state) => state.peerConnections);
 
   // Initialize WebSocket connection
   useWebSocket(spaceId);
@@ -72,7 +75,9 @@ function MeetingsContent() {
   }, [meetingStream]);
 
   // Get participants (for demo, show presence users)
-  const participants = Array.from(presence.values()).slice(0, 5);
+  const participants = useMemo(() => {
+    return Array.from(presence.values()).slice(0, 5);
+  }, [presence]);
 
   if (!inMeeting) {
     return (

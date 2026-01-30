@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::auth::AuthUser;
 use crate::db;
 use crate::error::AppResult;
 use crate::state::AppState;
@@ -27,6 +28,7 @@ pub struct ChatMessageResponse {
 }
 
 pub async fn get_messages(
+    _auth: AuthUser, // Require authentication
     State(state): State<Arc<AppState>>,
     Path(space_id): Path<Uuid>,
     Query(query): Query<GetMessagesQuery>,

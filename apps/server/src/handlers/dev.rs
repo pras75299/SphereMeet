@@ -5,7 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -13,7 +13,20 @@ pub struct SeedResponse {
     pub space_id: Uuid,
 }
 
+/// Check if we're in development mode
+fn is_dev_mode() -> bool {
+    std::env::var("RUST_ENV")
+        .map(|v| v != "production")
+        .unwrap_or(true)
+}
+
 pub async fn seed(State(state): State<Arc<AppState>>) -> AppResult<Json<SeedResponse>> {
+    // Only allow seeding in development mode
+    if !is_dev_mode() {
+        return Err(AppError::BadRequest(
+            "Seed endpoint is only available in development mode".to_string(),
+        ));
+    }
     // Create a space
     let space = db::create_space(&state.pool, "Main Office").await?;
 

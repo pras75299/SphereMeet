@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -44,6 +45,7 @@ pub struct SpaceDetailResponse {
 }
 
 pub async fn list_spaces(
+    _auth: AuthUser, // Require authentication
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<Vec<SpaceListItem>>> {
     let spaces = db::list_spaces(&state.pool).await?;
@@ -59,6 +61,7 @@ pub async fn list_spaces(
 }
 
 pub async fn get_space(
+    _auth: AuthUser, // Require authentication
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<SpaceDetailResponse>> {

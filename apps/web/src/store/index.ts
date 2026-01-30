@@ -1,5 +1,33 @@
 import { create } from 'zustand';
 
+// Helper to safely access localStorage
+const getStorageItem = (key: string): string | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const setStorageItem = (key: string, value: string): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage errors
+  }
+};
+
+const removeStorageItem = (key: string): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage errors
+  }
+};
+
 export interface User {
   id: string;
   display_name: string;
@@ -46,6 +74,10 @@ export interface PeerConnection {
 }
 
 interface AppState {
+  // Hydration
+  isHydrated: boolean;
+  hydrate: () => void;
+
   // Auth
   token: string | null;
   user: User | null;
@@ -100,17 +132,31 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => ({
-  // Auth
-  token: typeof window !== 'undefined' ? localStorage.getItem('token') : null,
-  user: typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('user') || 'null') : null,
+  // Hydration - start with null to avoid SSR mismatch
+  isHydrated: false,
+  hydrate: () => {
+    const token = getStorageItem('token');
+    const userStr = getStorageItem('user');
+    let user: User | null = null;
+    try {
+      user = userStr ? JSON.parse(userStr) : null;
+    } catch {
+      user = null;
+    }
+    set({ token, user, isHydrated: true });
+  },
+
+  // Auth - start with null, hydrate will populate from localStorage
+  token: null,
+  user: null,
   setAuth: (token, user) => {
-    localStorage.setItem('token', token);
-    localStorage.setItem('user', JSON.stringify(user));
+    setStorageItem('token', token);
+    setStorageItem('user', JSON.stringify(user));
     set({ token, user });
   },
   clearAuth: () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    removeStorageItem('token');
+    removeStorageItem('user');
     set({ token: null, user: null });
   },
 

@@ -8,7 +8,14 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 
 export default function HomePage() {
   const router = useRouter();
-  const { token, user, setAuth } = useStore();
+  const { token, user, setAuth, isHydrated, hydrate } = useStore();
+
+  // Hydrate store from localStorage on mount
+  useEffect(() => {
+    if (!isHydrated) {
+      hydrate();
+    }
+  }, [isHydrated, hydrate]);
   const [displayName, setDisplayName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -19,11 +26,17 @@ export default function HomePage() {
     if (token && user) {
       fetchSpaces();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, user]);
 
   const fetchSpaces = async () => {
+    if (!token) return;
     try {
-      const res = await fetch(`${API_BASE}/api/spaces`);
+      const res = await fetch(`${API_BASE}/api/spaces`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
       if (res.ok) {
         const data = await res.json();
         setSpaces(data);
@@ -81,6 +94,15 @@ export default function HomePage() {
   const handleJoinSpace = (spaceId: string) => {
     router.push(`/activity?space=${spaceId}`);
   };
+
+  // Show loading while hydrating to prevent SSR mismatch
+  if (!isHydrated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-[var(--muted)]">Loading...</div>
+      </div>
+    );
+  }
 
   if (!token || !user) {
     return (

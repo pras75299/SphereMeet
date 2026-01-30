@@ -8,15 +8,22 @@ function NavContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { token, user, spaceName, clearAuth } = useStore();
+  const { token, user, spaceName, clearAuth, isHydrated, hydrate } = useStore();
 
   const spaceId = searchParams.get('space');
 
+  // Hydrate store from localStorage on mount
   useEffect(() => {
-    if (!token || !user) {
+    if (!isHydrated) {
+      hydrate();
+    }
+  }, [isHydrated, hydrate]);
+
+  useEffect(() => {
+    if (isHydrated && (!token || !user)) {
       router.push('/');
     }
-  }, [token, user, router]);
+  }, [token, user, router, isHydrated]);
 
   const tabs = [
     { name: 'Meetings', href: `/meetings?space=${spaceId}` },
@@ -29,8 +36,13 @@ function NavContent({ children }: { children: React.ReactNode }) {
     router.push('/');
   };
 
-  if (!token || !user) {
-    return null;
+  // Show loading while hydrating or if not authenticated
+  if (!isHydrated || !token || !user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-[var(--muted)]">Loading...</div>
+      </div>
+    );
   }
 
   return (

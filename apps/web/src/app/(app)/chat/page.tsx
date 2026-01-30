@@ -23,6 +23,7 @@ function ChatContent() {
   const [loadingMessages, setLoadingMessages] = useState(false);
 
   const {
+    token,
     user,
     chatMessages,
     currentChannel,
@@ -35,12 +36,17 @@ function ChatContent() {
 
   // Fetch messages for current channel
   const fetchMessages = useCallback(async () => {
-    if (!spaceId) return;
+    if (!spaceId || !token) return;
 
     setLoadingMessages(true);
     try {
       const res = await fetch(
-        `${API_BASE}/api/chat/${spaceId}?channel=${currentChannel}`
+        `${API_BASE}/api/chat/${spaceId}?channel=${currentChannel}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        }
       );
       if (res.ok) {
         const messages = await res.json();
@@ -51,7 +57,7 @@ function ChatContent() {
     } finally {
       setLoadingMessages(false);
     }
-  }, [spaceId, currentChannel, setChatMessages]);
+  }, [spaceId, token, currentChannel, setChatMessages]);
 
   useEffect(() => {
     fetchMessages();

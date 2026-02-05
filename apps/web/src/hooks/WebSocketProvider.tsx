@@ -140,11 +140,44 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       const currentUser = userRef.current;
       const currentLocalStream = localStreamRef.current;
       
-      if (!currentUser || !currentLocalStream) return null;
+      if (!currentUser || !currentLocalStream) {
+        console.log('[WebRTC] Cannot create peer connection - missing user or stream', {
+          hasUser: !!currentUser,
+          hasStream: !!currentLocalStream
+        });
+        return null;
+      }
 
+      console.log('[WebRTC] Creating peer connection to', peerId, 'isInitiator:', isInitiator);
+
+      // Use both STUN and TURN servers for better connectivity
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          // Free public TURN server (for testing - consider using your own for production)
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+          },
+        ],
+        iceCandidatePoolSize: 10,
       });
+
+      // Log connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log('[WebRTC] Connection state with', peerId, ':', pc.connectionState);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log('[WebRTC] ICE connection state with', peerId, ':', pc.iceConnectionState);
+      };
 
       // Add local tracks
       currentLocalStream.getTracks().forEach((track) => {
@@ -153,23 +186,32 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'client.webrtc.ice',
-              payload: {
-                to_user_id: peerId,
-                candidate: event.candidate.toJSON(),
-              },
-            })
-          );
+        if (event.candidate) {
+          console.log('[WebRTC] ICE candidate generated for', peerId, event.candidate.type);
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'client.webrtc.ice',
+                payload: {
+                  to_user_id: peerId,
+                  candidate: event.candidate.toJSON(),
+                },
+              })
+            );
+          } else {
+            console.log('[WebRTC] Cannot send ICE candidate - WebSocket not ready');
+          }
+        } else {
+          console.log('[WebRTC] ICE gathering complete for', peerId);
         }
       };
 
       // Handle remote tracks
       pc.ontrack = (event) => {
+        console.log('[WebRTC] Received track from', peerId, event.track.kind);
         const remoteStream = event.streams[0];
         if (remoteStream) {
+          console.log('[WebRTC] Got remote stream from', peerId, 'tracks:', remoteStream.getTracks().length);
           updatePeerStream(peerId, remoteStream);
         }
       };
@@ -178,10 +220,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
       // If initiator, create offer
       if (isInitiator) {
+        console.log('[WebRTC] Creating offer for', peerId);
         pc.createOffer()
-          .then((offer) => pc.setLocalDescription(offer))
+          .then((offer) => {
+            console.log('[WebRTC] Offer created for', peerId);
+            return pc.setLocalDescription(offer);
+          })
           .then(() => {
+            console.log('[WebRTC] Local description set for', peerId);
             if (pc.localDescription && wsRef.current?.readyState === WebSocket.OPEN) {
+              console.log('[WebRTC] Sending offer to', peerId);
               wsRef.current.send(
                 JSON.stringify({
                   type: 'client.webrtc.offer',
@@ -191,9 +239,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
                   },
                 })
               );
+            } else {
+              console.log('[WebRTC] Cannot send offer - WebSocket not ready');
             }
           })
-          .catch((err) => console.error('Error creating offer:', err));
+          .catch((err) => console.error('[WebRTC] Error creating offer:', err));
       }
 
       return pc;
@@ -257,6 +307,12 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
             const currentLocalStream = localStreamRef.current;
 
+            console.log('[Proximity] Update received:', {
+              peers: payload.peers,
+              avEnabled: currentNearbyAvEnabled,
+              hasStream: !!currentLocalStream
+            });
+
             // Always update proximity peers list
             setProximityPeers(payload.peers);
 
@@ -264,6 +320,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             if (currentUser && currentNearbyAvEnabled && currentLocalStream) {
               const desiredPeers = new Set(payload.peers);
               const currentPeers = new Set(useStore.getState().peerConnections.keys());
+
+              console.log('[Proximity] Managing WebRTC connections:', {
+                desiredPeers: Array.from(desiredPeers),
+                currentPeers: Array.from(currentPeers)
+              });
 
               // Connect to new peers
               desiredPeers.forEach((peerId) => {
@@ -300,7 +361,15 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
             const currentLocalStream = localStreamRef.current;
 
-            if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) return;
+            console.log('[WebRTC] Received offer from', payload.from_user_id, {
+              avEnabled: currentNearbyAvEnabled,
+              hasStream: !!currentLocalStream
+            });
+
+            if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) {
+              console.log('[WebRTC] Ignoring offer - A/V not enabled or no stream');
+              return;
+            }
             if (!payload.sdp) return;
 
             const peerConnections = useStore.getState().peerConnections;
@@ -336,27 +405,37 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
           }
           case 'server.webrtc.answer': {
             const payload = message.payload as WebRTCSignalPayload;
+            console.log('[WebRTC] Received answer from', payload.from_user_id);
             if (!payload.sdp) return;
 
             const peerConnections = useStore.getState().peerConnections;
             const peerConn = peerConnections.get(payload.from_user_id);
-            if (!peerConn) return;
+            if (!peerConn) {
+              console.log('[WebRTC] No peer connection found for answer from', payload.from_user_id);
+              return;
+            }
 
             peerConn.pc
               .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
+              .then(() => console.log('[WebRTC] Set remote description (answer) for', payload.from_user_id))
               .catch((err) => console.error('Error handling answer:', err));
             break;
           }
           case 'server.webrtc.ice': {
             const payload = message.payload as WebRTCSignalPayload;
+            console.log('[WebRTC] Received ICE candidate from', payload.from_user_id);
             if (!payload.candidate) return;
 
             const peerConnections = useStore.getState().peerConnections;
             const peerConn = peerConnections.get(payload.from_user_id);
-            if (!peerConn) return;
+            if (!peerConn) {
+              console.log('[WebRTC] No peer connection found for ICE from', payload.from_user_id);
+              return;
+            }
 
             peerConn.pc
               .addIceCandidate(new RTCIceCandidate(payload.candidate))
+              .then(() => console.log('[WebRTC] Added ICE candidate for', payload.from_user_id))
               .catch((err) => console.error('Error adding ICE candidate:', err));
             break;
           }
@@ -380,9 +459,27 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
   // Main connection effect
   useEffect(() => {
-    if (!token || !spaceId) return;
-    if (wsRef.current?.readyState === WebSocket.OPEN || isConnectingRef.current) return;
+    if (!token || !spaceId) {
+      console.log('[WebSocket] Missing token or spaceId, not connecting');
+      return;
+    }
+    
+    // Check if already connected or connecting
+    const existingWs = wsRef.current;
+    if (existingWs) {
+      const state = existingWs.readyState;
+      if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
+        console.log('[WebSocket] Already connected/connecting, skipping');
+        return;
+      }
+    }
+    
+    if (isConnectingRef.current) {
+      console.log('[WebSocket] Connection attempt already in progress');
+      return;
+    }
 
+    console.log('[WebSocket] Starting new connection to space:', spaceId);
     isConnectingRef.current = true;
 
     const wsUrl = `${WS_BASE}/ws?token=${encodeURIComponent(token)}&space_id=${spaceId}`;
@@ -390,6 +487,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     wsRef.current = socket;
 
     socket.onopen = () => {
+      console.log('[WebSocket] Connected successfully');
       isConnectingRef.current = false;
       setWsConnected(true);
       setWs(socket);
@@ -397,38 +495,50 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
     socket.onmessage = handleMessage;
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
+      console.log('[WebSocket] Closed with code:', event.code, 'reason:', event.reason);
       isConnectingRef.current = false;
       setWsConnected(false);
       setWs(null);
-      wsRef.current = null;
+      
+      // Only clear ref if this is still the current socket
+      if (wsRef.current === socket) {
+        wsRef.current = null;
+      }
 
       // Clean up peer connections on disconnect
       clearPeerConnections();
 
-      // Reconnect after 2 seconds if not a clean close
-      if (event.code !== 1000) {
+      // Only attempt reconnect for unexpected closures
+      if (event.code !== 1000 && event.code !== 1001) {
+        console.log('[WebSocket] Unexpected close, will attempt reconnect');
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
         reconnectTimeoutRef.current = setTimeout(() => {
-          wsRef.current = null;
-          isConnectingRef.current = false;
+          if (wsRef.current === null) {
+            isConnectingRef.current = false;
+            // The effect will re-run and create a new connection
+          }
         }, 2000);
       }
     };
 
-    socket.onerror = () => {
+    socket.onerror = (event) => {
+      console.error('[WebSocket] Error:', event);
       isConnectingRef.current = false;
     };
 
     return () => {
+      console.log('[WebSocket] Cleanup triggered');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmounting');
+      // Only close if this socket is still current
+      if (wsRef.current === socket) {
+        console.log('[WebSocket] Closing socket');
+        socket.close(1000, 'Component unmounting');
         wsRef.current = null;
       }
       isConnectingRef.current = false;

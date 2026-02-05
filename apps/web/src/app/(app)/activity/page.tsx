@@ -3,13 +3,12 @@
 import { useEffect, useRef, useCallback, Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
-import { useWebSocket } from '@/hooks/useWebSocket';
+import { useWebSocketContext } from '@/hooks/WebSocketProvider';
 
 const TILE_SIZE = 32;
 
 function ActivityContent() {
-  const searchParams = useSearchParams();
-  const spaceId = searchParams.get('space');
+  useSearchParams(); // Keep to trigger re-render on URL changes
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Use individual selectors to prevent unnecessary re-renders
@@ -25,7 +24,7 @@ function ActivityContent() {
   const peerConnections = useStore((state) => state.peerConnections);
   const clearPeerConnections = useStore((state) => state.clearPeerConnections);
 
-  const { sendMove } = useWebSocket(spaceId);
+  const { sendMove } = useWebSocketContext();
 
   // Get current user's presence - memoized to prevent recalculation
   const selfPresence = useMemo(() => {

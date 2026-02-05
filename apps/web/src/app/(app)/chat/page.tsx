@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, Suspense, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useStore } from '@/store';
-import { useWebSocket } from '@/hooks/useWebSocket';
+import { useWebSocketContext } from '@/hooks/WebSocketProvider';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 
@@ -31,7 +31,7 @@ function ChatContent() {
   const setChatMessages = useStore((state) => state.setChatMessages);
   const presence = useStore((state) => state.presence);
 
-  const { sendChat } = useWebSocket(spaceId);
+  const { sendChat, isConnected } = useWebSocketContext();
 
   // Fetch messages for current channel
   const fetchMessages = useCallback(async () => {
@@ -73,11 +73,13 @@ function ChatContent() {
 
   const handleSendMessage = useCallback((e: React.FormEvent) => {
     e.preventDefault();
-    if (!messageInput.trim()) return;
+    if (!messageInput.trim() || !isConnected) return;
 
-    sendChat(currentChannel, messageInput.trim());
-    setMessageInput('');
-  }, [messageInput, currentChannel, sendChat]);
+    const sent = sendChat(currentChannel, messageInput.trim());
+    if (sent) {
+      setMessageInput('');
+    }
+  }, [messageInput, currentChannel, sendChat, isConnected]);
 
   const handleChannelChange = useCallback((channelId: string) => {
     setCurrentChannel(channelId);
@@ -148,6 +150,11 @@ function ChatContent() {
             <span className="font-semibold">
               {CHANNELS.find((c) => c.id === currentChannel)?.name || currentChannel}
             </span>
+            {!isConnected && (
+              <span className="px-2 py-0.5 rounded text-xs bg-yellow-600 text-white">
+                Reconnecting...
+              </span>
+            )}
           </div>
           <button
             onClick={handleGoToMeet}
@@ -223,10 +230,10 @@ function ChatContent() {
             />
             <button
               type="submit"
-              disabled={!messageInput.trim()}
+              disabled={!messageInput.trim() || !isConnected}
               className="px-6 py-3 rounded-lg bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white font-medium transition-colors disabled:opacity-50"
             >
-              Send
+              {isConnected ? 'Send' : 'Connecting...'}
             </button>
           </form>
         </div>

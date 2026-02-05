@@ -29,6 +29,7 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        tracing::error!("AppError: {:?}", self);
         let (status, message) = match &self {
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
@@ -36,7 +37,7 @@ impl IntoResponse for AppError {
             }
             AppError::Jwt(e) => {
                 tracing::error!("JWT error: {:?}", e);
-                (StatusCode::UNAUTHORIZED, "Invalid token".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("JWT error: {}", e))
             }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

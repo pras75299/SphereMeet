@@ -1,13 +1,9 @@
 'use client';
 
 import { useEffect, useState, useCallback, Suspense, useMemo } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { useStore } from '@/store';
-import { useWebSocket } from '@/hooks/useWebSocket';
 
 function MeetingsContent() {
-  const searchParams = useSearchParams();
-  const spaceId = searchParams.get('space');
   const [inMeeting, setInMeeting] = useState(false);
   const [meetingStream, setMeetingStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
@@ -18,8 +14,7 @@ function MeetingsContent() {
   const presence = useStore((state) => state.presence);
   const peerConnections = useStore((state) => state.peerConnections);
 
-  // Initialize WebSocket connection
-  useWebSocket(spaceId);
+  // WebSocket connection is managed by WebSocketProvider at the layout level
 
   const handleJoinMeeting = useCallback(async () => {
     try {

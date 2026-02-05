@@ -18,7 +18,8 @@ use std::time::Duration;
 use tokio::signal;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
-use tower_http::cors::{Any, CorsLayer};
+use axum::http::{header::{AUTHORIZATION, ACCEPT, CONTENT_TYPE}, Method};
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::state::AppState;
@@ -92,8 +93,8 @@ async fn main() {
 
     let cors = CorsLayer::new()
         .allow_origin(cors_header)
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE])
         .allow_credentials(true);
 
     // Rate limiting configuration
@@ -139,10 +140,14 @@ async fn main() {
     tracing::info!("Server listening on http://localhost:8080");
 
     // Graceful shutdown handling
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("Server error");
+    // Use IntoMakeServiceWithConnectInfo to provide client IP for rate limiting
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("Server error");
 
     tracing::info!("Server shut down gracefully");
 }

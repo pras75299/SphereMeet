@@ -27,7 +27,14 @@ pub async fn seed(State(state): State<Arc<AppState>>) -> AppResult<Json<SeedResp
             "Seed endpoint is only available in development mode".to_string(),
         ));
     }
-    // Create a space
+    
+    // Check if a space already exists - return existing one instead of creating duplicate
+    let existing_spaces = db::list_spaces(&state.pool).await?;
+    if let Some(existing) = existing_spaces.first() {
+        return Ok(Json(SeedResponse { space_id: existing.id }));
+    }
+    
+    // Create a space only if none exist
     let space = db::create_space(&state.pool, "Main Office").await?;
 
     // Create a 20x15 map

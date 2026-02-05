@@ -4,7 +4,7 @@ use axum::{
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
 };
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -53,19 +53,25 @@ pub fn create_token(user_id: Uuid, display_name: &str) -> AppResult<String> {
         iat: now.timestamp(),
     };
 
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
-    )
-    .map_err(AppError::Jwt)
+    let header = Header::new(Algorithm::HS256);
+    let key = EncodingKey::from_secret(JWT_SECRET.as_bytes());
+    
+    tracing::debug!("Creating JWT token for user: {}", user_id);
+    
+    encode(&header, &claims, &key).map_err(|e| {
+        tracing::error!("JWT encode error: {:?}", e);
+        AppError::Jwt(e)
+    })
 }
 
 pub fn verify_token(token: &str) -> AppResult<Claims> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_required_spec_claims(&["exp", "iat", "sub"]);
+    
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
     .map_err(AppError::Jwt)?;
 

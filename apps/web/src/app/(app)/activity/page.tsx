@@ -307,25 +307,65 @@ function ActivityContent() {
           </div>
         )}
 
+        {/* Status info */}
+        <div className="p-4 border-b border-[var(--border)] text-xs space-y-1">
+          <div className="flex justify-between">
+            <span className="text-[var(--muted)]">A/V Status:</span>
+            <span className={nearbyAvEnabled ? 'text-green-500' : 'text-yellow-500'}>
+              {nearbyAvEnabled ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[var(--muted)]">Camera/Mic:</span>
+            <span className={localStream ? 'text-green-500' : 'text-red-500'}>
+              {localStream ? 'Active' : 'Inactive'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[var(--muted)]">Nearby Users:</span>
+            <span className="text-[var(--foreground)]">{proximityPeers.length}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[var(--muted)]">Connections:</span>
+            <span className="text-[var(--foreground)]">{peerConnections.size}</span>
+          </div>
+        </div>
+
         {/* Nearby peers */}
         <div className="flex-1 overflow-auto p-4">
           <p className="text-xs text-[var(--muted)] mb-2">
             Nearby ({proximityPeers.length})
           </p>
           {proximityPeers.length === 0 ? (
-            <p className="text-sm text-[var(--muted)]">
-              Move closer to others to connect
-            </p>
+            <div className="space-y-2">
+              <p className="text-sm text-[var(--muted)]">
+                Move closer to others to connect
+              </p>
+              <p className="text-xs text-[var(--muted)]">
+                (Within 4 tiles on the map)
+              </p>
+            </div>
           ) : (
             <div className="space-y-3">
               {proximityPeers.map((peerId) => {
                 const peerPresence = presence.get(peerId);
                 const peerConnection = peerConnections.get(peerId);
+                const connectionState = peerConnection?.pc?.connectionState || 'none';
                 return (
                   <div key={peerId} className="space-y-1">
-                    <p className="text-xs text-[var(--muted)]">
-                      {peerPresence?.display_name || 'Unknown'}
-                    </p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-[var(--muted)]">
+                        {peerPresence?.display_name || 'Unknown'}
+                      </p>
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        connectionState === 'connected' ? 'bg-green-500/20 text-green-500' :
+                        connectionState === 'connecting' ? 'bg-yellow-500/20 text-yellow-500' :
+                        connectionState === 'failed' ? 'bg-red-500/20 text-red-500' :
+                        'bg-gray-500/20 text-gray-500'
+                      }`}>
+                        {connectionState}
+                      </span>
+                    </div>
                     {peerConnection?.remoteStream ? (
                       <video
                         autoPlay
@@ -338,10 +378,19 @@ function ActivityContent() {
                         className="w-full aspect-video rounded-lg bg-black object-cover"
                       />
                     ) : (
-                      <div className="w-full aspect-video rounded-lg bg-[var(--background)] flex items-center justify-center">
+                      <div className="w-full aspect-video rounded-lg bg-[var(--background)] flex items-center justify-center flex-col gap-1">
                         <span className="text-xs text-[var(--muted)]">
-                          {nearbyAvEnabled ? 'Connecting...' : 'Enable A/V'}
+                          {!nearbyAvEnabled ? 'Enable A/V to connect' : 
+                           connectionState === 'none' ? 'Waiting for peer...' :
+                           connectionState === 'connecting' ? 'Connecting...' :
+                           connectionState === 'failed' ? 'Connection failed' :
+                           'Waiting for video...'}
                         </span>
+                        {!nearbyAvEnabled && (
+                          <span className="text-xs text-yellow-500">
+                            Both users need A/V enabled
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>

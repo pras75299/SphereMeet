@@ -14,13 +14,62 @@ const CHANNELS = [
   { id: 'help', name: 'Help', icon: '#' },
 ];
 
+// Helper function to parse message body and render mentions with highlighting
+function renderMessageWithMentions(body: string, currentUserId?: string) {
+  // Match @username patterns (alphanumeric, spaces allowed within the mention)
+  const mentionRegex = /@([a-zA-Z0-9_\s]+?)(?=\s@|\s|$|[.,!?])/g;
+  const parts: (string | JSX.Element)[] = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = mentionRegex.exec(body)) !== null) {
+    // Add text before the mention
+    if (match.index > lastIndex) {
+      parts.push(body.slice(lastIndex, match.index));
+    }
+    
+    const mentionedName = match[1].trim();
+    const isSelfMention = currentUserId && mentionedName.toLowerCase() === 'you';
+    
+    // Add the highlighted mention
+    parts.push(
+      <span
+        key={match.index}
+        className={`px-1 rounded ${
+          isSelfMention 
+            ? 'bg-yellow-500/30 text-yellow-300 font-medium' 
+            : 'bg-[var(--primary)]/30 text-[var(--primary)] font-medium'
+        }`}
+      >
+        @{mentionedName}
+      </span>
+    );
+    
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Add remaining text after last mention
+  if (lastIndex < body.length) {
+    parts.push(body.slice(lastIndex));
+  }
+  
+  return parts.length > 0 ? parts : body;
+}
+
 function ChatContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const spaceId = searchParams.get('space');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [messageInput, setMessageInput] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(false);
+  
+  // Mention autocomplete state
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionStartIndex, setMentionStartIndex] = useState(-1);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
 
   // Use individual selectors to prevent re-renders
   const token = useStore((state) => state.token);
@@ -92,6 +141,107 @@ function ChatContent() {
   const onlineUsers = useMemo(() => {
     return Array.from(presence.values());
   }, [presence]);
+
+  // Filter users for mention autocomplete
+  const filteredMentionUsers = useMemo(() => {
+    if (!showMentions) return [];
+    const query = mentionQuery.toLowerCase();
+    return onlineUsers.filter(
+      (u) => u.display_name.toLowerCase().includes(query)
+    );
+  }, [showMentions, mentionQuery, onlineUsers]);
+
+  // Reset selected index when filtered users change
+  useEffect(() => {
+    setSelectedMentionIndex(0);
+  }, [filteredMentionUsers.length]);
+
+  // Handle input change with mention detection
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    const cursorPos = e.target.selectionStart || 0;
+    setMessageInput(value);
+
+    // Find if we're in a mention context (@ followed by characters, no space completing it)
+    const textBeforeCursor = value.slice(0, cursorPos);
+    const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+    
+    if (lastAtIndex !== -1) {
+      const textAfterAt = textBeforeCursor.slice(lastAtIndex + 1);
+      // Check if there's no space after @ (still typing the mention)
+      if (!textAfterAt.includes(' ') || textAfterAt.split(' ').length <= 2) {
+        // Only show mentions if the query part doesn't have more than one space
+        const queryPart = textAfterAt.split(' ').slice(0, 2).join(' ');
+        if (queryPart.length <= 30) {
+          setShowMentions(true);
+          setMentionQuery(queryPart);
+          setMentionStartIndex(lastAtIndex);
+          return;
+        }
+      }
+    }
+    
+    setShowMentions(false);
+    setMentionQuery('');
+    setMentionStartIndex(-1);
+  }, []);
+
+  // Insert mention into input
+  const insertMention = useCallback((displayName: string) => {
+    if (mentionStartIndex === -1) return;
+    
+    const beforeMention = messageInput.slice(0, mentionStartIndex);
+    const afterMention = messageInput.slice(
+      mentionStartIndex + 1 + mentionQuery.length
+    );
+    
+    const newValue = `${beforeMention}@${displayName} ${afterMention}`;
+    setMessageInput(newValue);
+    setShowMentions(false);
+    setMentionQuery('');
+    setMentionStartIndex(-1);
+    
+    // Focus back on input
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 0);
+  }, [messageInput, mentionStartIndex, mentionQuery]);
+
+  // Handle keyboard navigation for mentions
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showMentions || filteredMentionUsers.length === 0) return;
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setSelectedMentionIndex((prev) => 
+          prev < filteredMentionUsers.length - 1 ? prev + 1 : 0
+        );
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setSelectedMentionIndex((prev) => 
+          prev > 0 ? prev - 1 : filteredMentionUsers.length - 1
+        );
+        break;
+      case 'Enter':
+        if (showMentions && filteredMentionUsers[selectedMentionIndex]) {
+          e.preventDefault();
+          insertMention(filteredMentionUsers[selectedMentionIndex].display_name);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setShowMentions(false);
+        break;
+      case 'Tab':
+        if (filteredMentionUsers[selectedMentionIndex]) {
+          e.preventDefault();
+          insertMention(filteredMentionUsers[selectedMentionIndex].display_name);
+        }
+        break;
+    }
+  }, [showMentions, filteredMentionUsers, selectedMentionIndex, insertMention]);
 
   return (
     <div className="h-[calc(100vh-60px)] flex">
@@ -208,7 +358,9 @@ function ChatContent() {
                         })}
                       </span>
                     </div>
-                    <p className="text-sm mt-0.5">{message.body}</p>
+                    <p className="text-sm mt-0.5">
+                      {renderMessageWithMentions(message.body, user?.id)}
+                    </p>
                   </div>
                 </div>
               );
@@ -218,16 +370,68 @@ function ChatContent() {
         </div>
 
         {/* Message input */}
-        <div className="p-4 border-t border-[var(--border)] bg-[var(--card)]">
+        <div className="p-4 border-t border-[var(--border)] bg-[var(--card)] relative">
+          {/* Mention autocomplete dropdown */}
+          {showMentions && filteredMentionUsers.length > 0 && (
+            <div className="absolute bottom-full left-4 right-4 mb-2 bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-lg max-h-48 overflow-auto">
+              <div className="p-2">
+                <p className="text-xs text-[var(--muted)] px-2 py-1 mb-1">
+                  Tag someone — press ↑↓ to navigate, Enter or Tab to select
+                </p>
+                {filteredMentionUsers.map((mentionUser, index) => (
+                  <button
+                    key={mentionUser.user_id}
+                    type="button"
+                    onClick={() => insertMention(mentionUser.display_name)}
+                    onMouseEnter={() => setSelectedMentionIndex(index)}
+                    className={`w-full px-3 py-2 rounded-md flex items-center gap-3 transition-colors ${
+                      index === selectedMentionIndex
+                        ? 'bg-[var(--primary)] text-white'
+                        : 'hover:bg-[var(--card-hover)]'
+                    }`}
+                  >
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${
+                        index === selectedMentionIndex
+                          ? 'bg-white/20'
+                          : 'bg-[var(--border)]'
+                      }`}
+                    >
+                      {mentionUser.display_name
+                        .split(' ')
+                        .map((n) => n[0])
+                        .join('')
+                        .toUpperCase()
+                        .slice(0, 2)}
+                    </div>
+                    <div className="flex-1 text-left">
+                      <span className="text-sm font-medium">
+                        {mentionUser.display_name}
+                      </span>
+                      {user?.id === mentionUser.user_id && (
+                        <span className="text-xs ml-2 opacity-70">(you)</span>
+                      )}
+                    </div>
+                    <span className="w-2 h-2 rounded-full bg-green-500"></span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          
           <form onSubmit={handleSendMessage} className="flex gap-2">
-            <input
-              type="text"
-              value={messageInput}
-              onChange={(e) => setMessageInput(e.target.value)}
-              placeholder={`Message #${currentChannel}`}
-              className="flex-1 px-4 py-3 rounded-lg bg-[var(--background)] border border-[var(--border)] focus:outline-none focus:border-[var(--primary)] transition-colors"
-              maxLength={1000}
-            />
+            <div className="flex-1 relative">
+              <input
+                ref={inputRef}
+                type="text"
+                value={messageInput}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                placeholder={`Message #${currentChannel} — Type @ to mention someone`}
+                className="w-full px-4 py-3 rounded-lg bg-[var(--background)] border border-[var(--border)] focus:outline-none focus:border-[var(--primary)] transition-colors"
+                maxLength={1000}
+              />
+            </div>
             <button
               type="submit"
               disabled={!messageInput.trim() || !isConnected}

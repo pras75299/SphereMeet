@@ -154,9 +154,17 @@ pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<Option<User>> {
 }
 
 // Space operations
+/// List spaces, one per name (keeps most recent if duplicates exist e.g. multiple "Main Office").
 pub async fn list_spaces(pool: &PgPool) -> AppResult<Vec<Space>> {
     let spaces = sqlx::query_as::<_, Space>(
-        "SELECT id, name, created_at FROM spaces ORDER BY created_at DESC",
+        r#"
+        SELECT id, name, created_at FROM (
+            SELECT DISTINCT ON (name) id, name, created_at
+            FROM spaces
+            ORDER BY name, created_at DESC
+        ) AS deduped
+        ORDER BY created_at DESC
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -169,6 +177,17 @@ pub async fn get_space(pool: &PgPool, id: Uuid) -> AppResult<Option<Space>> {
         "SELECT id, name, created_at FROM spaces WHERE id = $1",
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(space)
+}
+
+pub async fn get_space_by_name(pool: &PgPool, name: &str) -> AppResult<Option<Space>> {
+    let space = sqlx::query_as::<_, Space>(
+        "SELECT id, name, created_at FROM spaces WHERE name = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(name)
     .fetch_optional(pool)
     .await?;
 

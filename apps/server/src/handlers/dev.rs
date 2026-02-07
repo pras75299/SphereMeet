@@ -28,14 +28,12 @@ pub async fn seed(State(state): State<Arc<AppState>>) -> AppResult<Json<SeedResp
         ));
     }
     
-    // Check if a space already exists - return existing one instead of creating duplicate
-    let existing_spaces = db::list_spaces(&state.pool).await?;
-    if let Some(existing) = existing_spaces.first() {
+    const DEMO_SPACE_NAME: &str = "Main Office";
+    // Return existing "Main Office" if present, so we never create duplicates (e.g. from double-click)
+    if let Some(existing) = db::get_space_by_name(&state.pool, DEMO_SPACE_NAME).await? {
         return Ok(Json(SeedResponse { space_id: existing.id }));
     }
-    
-    // Create a space only if none exist
-    let space = db::create_space(&state.pool, "Main Office").await?;
+    let space = db::create_space(&state.pool, DEMO_SPACE_NAME).await?;
 
     // Create a 20x15 map
     let width = 20;

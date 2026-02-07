@@ -97,6 +97,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
+  /** Queue ICE candidates until remote description is set (required for connection in many browsers) */
+  const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
   // Get stable references to store functions
   const token = useStore((state) => state.token);
@@ -107,6 +109,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const updatePresence = useStore((state) => state.updatePresence);
   const removePresence = useStore((state) => state.removePresence);
   const setProximityPeers = useStore((state) => state.setProximityPeers);
+  const proximityPeers = useStore((state) => state.proximityPeers);
   const addChatMessage = useStore((state) => state.addChatMessage);
   const setWs = useStore((state) => state.setWs);
   const setWsConnected = useStore((state) => state.setWsConnected);
@@ -134,6 +137,22 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
+
+  const getWs = useCallback(() => wsRef.current ?? useStore.getState().ws ?? null, []);
+
+  const drainIceQueue = useCallback((peerId: string) => {
+    const queue = pendingIceRef.current.get(peerId);
+    if (!queue?.length) return;
+    const peerConn = useStore.getState().peerConnections.get(peerId);
+    if (!peerConn?.pc?.remoteDescription) return;
+    const pc = peerConn.pc;
+    pendingIceRef.current.delete(peerId);
+    queue.forEach((candidate) => {
+      pc.addIceCandidate(new RTCIceCandidate(candidate))
+        .then(() => console.log('[WebRTC] Added queued ICE candidate for', peerId))
+        .catch((err) => console.error('[WebRTC] Error adding queued ICE candidate:', err));
+    });
+  }, []);
 
   const createPeerConnection = useCallback(
     (peerId: string, isInitiator: boolean): RTCPeerConnection | null => {
@@ -188,8 +207,9 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           console.log('[WebRTC] ICE candidate generated for', peerId, event.candidate.type);
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
+          const ws = getWs();
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(
               JSON.stringify({
                 type: 'client.webrtc.ice',
                 payload: {
@@ -206,14 +226,27 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
         }
       };
 
-      // Handle remote tracks
+      // Handle remote tracks (can fire once per track; merge into one stream per peer)
       pc.ontrack = (event) => {
         console.log('[WebRTC] Received track from', peerId, event.track.kind);
-        const remoteStream = event.streams[0];
-        if (remoteStream) {
-          console.log('[WebRTC] Got remote stream from', peerId, 'tracks:', remoteStream.getTracks().length);
-          updatePeerStream(peerId, remoteStream);
+        const existing = useStore.getState().peerConnections.get(peerId)?.remoteStream;
+        let stream: MediaStream;
+        if (event.streams && event.streams[0]) {
+          stream = event.streams[0];
+          if (existing && !existing.getTracks().includes(event.track)) {
+            existing.addTrack(event.track);
+            stream = existing;
+          }
+        } else {
+          if (existing && !existing.getTracks().includes(event.track)) {
+            existing.addTrack(event.track);
+            stream = existing;
+          } else {
+            stream = new MediaStream([event.track]);
+          }
         }
+        console.log('[WebRTC] Got remote stream from', peerId, 'tracks:', stream.getTracks().length);
+        updatePeerStream(peerId, stream);
       };
 
       setPeerConnection(peerId, pc, null);
@@ -228,9 +261,10 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
           })
           .then(() => {
             console.log('[WebRTC] Local description set for', peerId);
-            if (pc.localDescription && wsRef.current?.readyState === WebSocket.OPEN) {
+            const ws = getWs();
+            if (pc.localDescription && ws?.readyState === WebSocket.OPEN) {
               console.log('[WebRTC] Sending offer to', peerId);
-              wsRef.current.send(
+              ws.send(
                 JSON.stringify({
                   type: 'client.webrtc.offer',
                   payload: {
@@ -248,7 +282,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
       return pc;
     },
-    [setPeerConnection, updatePeerStream]
+    [setPeerConnection, updatePeerStream, getWs]
   );
 
   const handleMessage = useCallback(
@@ -337,6 +371,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
               // Disconnect from peers no longer in range
               currentPeers.forEach((peerId) => {
                 if (!desiredPeers.has(peerId)) {
+                  pendingIceRef.current.delete(peerId);
                   removePeerConnection(peerId);
                 }
               });
@@ -388,8 +423,9 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
               .then(() => pc.createAnswer())
               .then((answer) => pc.setLocalDescription(answer))
               .then(() => {
-                if (wsRef.current?.readyState === WebSocket.OPEN) {
-                  wsRef.current.send(
+                const ws = getWs();
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(
                     JSON.stringify({
                       type: 'client.webrtc.answer',
                       payload: {
@@ -399,6 +435,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
                     })
                   );
                 }
+                drainIceQueue(payload.from_user_id);
               })
               .catch((err) => console.error('Error handling offer:', err));
             break;
@@ -417,7 +454,10 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
             peerConn.pc
               .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
-              .then(() => console.log('[WebRTC] Set remote description (answer) for', payload.from_user_id))
+              .then(() => {
+                console.log('[WebRTC] Set remote description (answer) for', payload.from_user_id);
+                drainIceQueue(payload.from_user_id);
+              })
               .catch((err) => console.error('Error handling answer:', err));
             break;
           }
@@ -433,8 +473,15 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
               return;
             }
 
-            peerConn.pc
-              .addIceCandidate(new RTCIceCandidate(payload.candidate))
+            const pc = peerConn.pc;
+            if (!pc.remoteDescription) {
+              const queue = pendingIceRef.current.get(payload.from_user_id) ?? [];
+              queue.push(payload.candidate);
+              pendingIceRef.current.set(payload.from_user_id, queue);
+              console.log('[WebRTC] Queued ICE candidate for', payload.from_user_id, '(no remote description yet)');
+              return;
+            }
+            pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
               .then(() => console.log('[WebRTC] Added ICE candidate for', payload.from_user_id))
               .catch((err) => console.error('Error adding ICE candidate:', err));
             break;
@@ -454,8 +501,33 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       addChatMessage,
       createPeerConnection,
       removePeerConnection,
+      getWs,
+      drainIceQueue,
     ]
   );
+
+  // When user enables A/V after already being in proximity, create peer connections for current proximity peers
+  // (server.proximity was already received when A/V was off, so we never created PCs)
+  useEffect(() => {
+    const state = useStore.getState();
+    const { user: currentUser, nearbyAvEnabled: enabled, localStream: stream, peerConnections: conns } = state;
+    if (!currentUser || !enabled || !stream || proximityPeers.length === 0) return;
+    const currentPeers = new Set(conns.keys());
+    const desiredPeers = new Set(proximityPeers);
+    desiredPeers.forEach((peerId) => {
+      if (!currentPeers.has(peerId)) {
+        const isInitiator = currentUser.id < peerId;
+        console.log('[Proximity] A/V just enabled – creating peer connection to', peerId);
+        createPeerConnection(peerId, isInitiator);
+      }
+    });
+    currentPeers.forEach((peerId) => {
+      if (!desiredPeers.has(peerId)) {
+        pendingIceRef.current.delete(peerId);
+        removePeerConnection(peerId);
+      }
+    });
+  }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection]);
 
   // Main connection effect
   useEffect(() => {
@@ -507,6 +579,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       }
 
       // Clean up peer connections on disconnect
+      pendingIceRef.current.clear();
       clearPeerConnections();
 
       // Only attempt reconnect for unexpected closures
@@ -542,6 +615,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
         wsRef.current = null;
       }
       isConnectingRef.current = false;
+      pendingIceRef.current.clear();
       clearPeerConnections();
     };
   }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);

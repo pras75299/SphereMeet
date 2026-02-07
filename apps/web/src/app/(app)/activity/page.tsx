@@ -7,6 +7,27 @@ import { useWebSocketContext } from '@/hooks/WebSocketProvider';
 
 const TILE_SIZE = 32;
 
+/** Syncs remote stream to video element when stream arrives and ensures it plays. */
+function PeerVideo({ stream }: { stream: MediaStream | null }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !stream) return;
+    el.srcObject = stream;
+    el.play().catch(() => { /* autoplay policy may block; user can tap to play */ });
+  }, [stream]);
+  if (!stream) return null;
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={false}
+      className="w-full aspect-video rounded-lg bg-black object-cover"
+    />
+  );
+}
+
 function ActivityContent() {
   useSearchParams(); // Keep to trigger re-render on URL changes
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -367,16 +388,7 @@ function ActivityContent() {
                       </span>
                     </div>
                     {peerConnection?.remoteStream ? (
-                      <video
-                        autoPlay
-                        playsInline
-                        ref={(el) => {
-                          if (el && peerConnection.remoteStream) {
-                            el.srcObject = peerConnection.remoteStream;
-                          }
-                        }}
-                        className="w-full aspect-video rounded-lg bg-black object-cover"
-                      />
+                      <PeerVideo stream={peerConnection.remoteStream} />
                     ) : (
                       <div className="w-full aspect-video rounded-lg bg-[var(--background)] flex items-center justify-center flex-col gap-1">
                         <span className="text-xs text-[var(--muted)]">

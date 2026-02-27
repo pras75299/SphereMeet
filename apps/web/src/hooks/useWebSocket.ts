@@ -416,10 +416,12 @@ export function useWebSocket(spaceId: string | null) {
     };
   }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);
 
-  const sendMessage = useCallback((type: string, payload: unknown) => {
+  const sendMessage = useCallback((type: string, payload: unknown): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, payload }));
+      return true;
     }
+    return false;
   }, []);
 
   const sendMove = useCallback(
@@ -430,8 +432,8 @@ export function useWebSocket(spaceId: string | null) {
   );
 
   const sendChat = useCallback(
-    (channel: string, body: string) => {
-      sendMessage('client.chat.send', { channel, body });
+    (channel: string, body: string): boolean => {
+      return sendMessage('client.chat.send', { channel, body });
     },
     [sendMessage]
   );

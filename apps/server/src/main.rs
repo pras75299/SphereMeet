@@ -144,11 +144,13 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .expect("Failed to bind to port 8080");
+        .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", bind_addr, e));
 
-    tracing::info!("Server listening on http://localhost:8080");
+    tracing::info!("Server listening on http://0.0.0.0:{}", port);
 
     // Graceful shutdown handling
     // Use IntoMakeServiceWithConnectInfo to provide client IP for rate limiting

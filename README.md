@@ -1,4 +1,4 @@
-# Gather Clone
+# Spheremeet
 
 A production-quality MVP inspired by Gather + Slack + Zoom with TRUE PROXIMITY AUDIO/VIDEO.
 
@@ -13,13 +13,15 @@ A production-quality MVP inspired by Gather + Slack + Zoom with TRUE PROXIMITY A
 
 ## Architecture
 
-### Backend (Rust + Axum)
+### Backend (Rust + Axum) = https://spheremeet.onrender.com
+
 - REST API for auth, spaces, and chat history
 - WebSocket for real-time presence, proximity updates, and WebRTC signaling
 - PostgreSQL for persistence
 - In-memory state for presence and proximity computation
 
-### Frontend (Next.js + TypeScript)
+### Frontend (Next.js + TypeScript) = https://sphere-meet-eosin.vercel.app
+
 - Zustand for state management
 - Native WebSocket for real-time communication
 - Native WebRTC for peer-to-peer audio/video
@@ -152,38 +154,38 @@ gather-clone/
 
 ### REST Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/auth/guest` | Create guest user |
-| POST | `/api/dev/seed` | Seed demo space |
-| GET | `/api/spaces` | List all spaces |
-| GET | `/api/spaces/:id` | Get space details |
-| GET | `/api/chat/:space_id` | Get chat messages |
+| Method | Path                  | Description       |
+| ------ | --------------------- | ----------------- |
+| POST   | `/api/auth/guest`     | Create guest user |
+| POST   | `/api/dev/seed`       | Seed demo space   |
+| GET    | `/api/spaces`         | List all spaces   |
+| GET    | `/api/spaces/:id`     | Get space details |
+| GET    | `/api/chat/:space_id` | Get chat messages |
 
 ### WebSocket Messages
 
 #### Client → Server
 
-| Type | Description |
-|------|-------------|
-| `client.move` | Move avatar |
-| `client.chat.send` | Send chat message |
-| `client.webrtc.offer` | Send WebRTC offer |
+| Type                   | Description        |
+| ---------------------- | ------------------ |
+| `client.move`          | Move avatar        |
+| `client.chat.send`     | Send chat message  |
+| `client.webrtc.offer`  | Send WebRTC offer  |
 | `client.webrtc.answer` | Send WebRTC answer |
-| `client.webrtc.ice` | Send ICE candidate |
+| `client.webrtc.ice`    | Send ICE candidate |
 
 #### Server → Client
 
-| Type | Description |
-|------|-------------|
-| `server.joined` | Initial state on join |
-| `server.presence.update` | User position update |
-| `server.presence.leave` | User left |
-| `server.proximity` | Authoritative peer list |
-| `server.chat.new` | New chat message |
-| `server.webrtc.offer` | Forwarded offer |
-| `server.webrtc.answer` | Forwarded answer |
-| `server.webrtc.ice` | Forwarded ICE candidate |
+| Type                     | Description             |
+| ------------------------ | ----------------------- |
+| `server.joined`          | Initial state on join   |
+| `server.presence.update` | User position update    |
+| `server.presence.leave`  | User left               |
+| `server.proximity`       | Authoritative peer list |
+| `server.chat.new`        | New chat message        |
+| `server.webrtc.offer`    | Forwarded offer         |
+| `server.webrtc.answer`   | Forwarded answer        |
+| `server.webrtc.ice`      | Forwarded ICE candidate |
 
 ## Proximity Rules
 

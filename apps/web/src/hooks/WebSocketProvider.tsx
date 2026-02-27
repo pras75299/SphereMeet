@@ -99,6 +99,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const isConnectingRef = useRef(false);
   /** Queue ICE candidates until remote description is set (required for connection in many browsers) */
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  /** Offers received while A/V was disabled; process when user enables A/V */
+  const pendingOffersRef = useRef<Map<string, { sdp: string }>>(new Map());
 
   // Get stable references to store functions
   const token = useStore((state) => state.token);
@@ -335,6 +337,22 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             removePresence(payload.user_id);
             break;
           }
+          case 'server.presence.snapshot': {
+            const payload = message.payload as { presence: Array<{ user_id: string; display_name: string; x: number; y: number; dir: string; zone_id: string | null }> };
+            if (Array.isArray(payload.presence)) {
+              setPresence(
+                payload.presence.map((p) => ({
+                  user_id: p.user_id,
+                  display_name: p.display_name,
+                  x: p.x,
+                  y: p.y,
+                  dir: p.dir as 'up' | 'down' | 'left' | 'right',
+                  zone_id: p.zone_id,
+                }))
+              );
+            }
+            break;
+          }
           case 'server.proximity': {
             const payload = message.payload as ProximityPayload;
             const currentUser = userRef.current;
@@ -372,6 +390,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
               currentPeers.forEach((peerId) => {
                 if (!desiredPeers.has(peerId)) {
                   pendingIceRef.current.delete(peerId);
+                  pendingOffersRef.current.delete(peerId);
                   removePeerConnection(peerId);
                 }
               });
@@ -401,11 +420,13 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
               hasStream: !!currentLocalStream
             });
 
+            if (!payload.sdp) return;
+
             if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) {
-              console.log('[WebRTC] Ignoring offer - A/V not enabled or no stream');
+              console.log('[WebRTC] Storing offer – will process when A/V is enabled');
+              pendingOffersRef.current.set(payload.from_user_id, { sdp: payload.sdp });
               return;
             }
-            if (!payload.sdp) return;
 
             const peerConnections = useStore.getState().peerConnections;
             let peerConn = peerConnections.get(payload.from_user_id);
@@ -506,14 +527,15 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     ]
   );
 
-  // When user enables A/V after already being in proximity, create peer connections for current proximity peers
-  // (server.proximity was already received when A/V was off, so we never created PCs)
+  // When user enables A/V: create peer connections for proximity peers and process any offers we received while A/V was off
   useEffect(() => {
     const state = useStore.getState();
     const { user: currentUser, nearbyAvEnabled: enabled, localStream: stream, peerConnections: conns } = state;
-    if (!currentUser || !enabled || !stream || proximityPeers.length === 0) return;
+    if (!currentUser || !enabled || !stream) return;
+
     const currentPeers = new Set(conns.keys());
     const desiredPeers = new Set(proximityPeers);
+
     desiredPeers.forEach((peerId) => {
       if (!currentPeers.has(peerId)) {
         const isInitiator = currentUser.id < peerId;
@@ -521,13 +543,41 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
         createPeerConnection(peerId, isInitiator);
       }
     });
+
     currentPeers.forEach((peerId) => {
       if (!desiredPeers.has(peerId)) {
         pendingIceRef.current.delete(peerId);
+        pendingOffersRef.current.delete(peerId);
         removePeerConnection(peerId);
       }
     });
-  }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection]);
+
+    // Process offers that arrived while A/V was disabled
+    const offersCopy = new Map(pendingOffersRef.current);
+    pendingOffersRef.current.clear();
+    offersCopy.forEach(({ sdp }, fromUserId) => {
+      const connsNow = useStore.getState().peerConnections;
+      if (connsNow.has(fromUserId)) return;
+      const pc = createPeerConnection(fromUserId, false);
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
+        .then(() => pc.createAnswer())
+        .then((answer) => pc.setLocalDescription(answer))
+        .then(() => {
+          const ws = getWs();
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: 'client.webrtc.answer',
+                payload: { to_user_id: fromUserId, sdp: pc.localDescription?.sdp },
+              })
+            );
+          }
+          drainIceQueue(fromUserId);
+        })
+        .catch((err) => console.error('[WebRTC] Error processing pending offer:', err));
+    });
+  }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection, getWs, drainIceQueue]);
 
   // Main connection effect
   useEffect(() => {
@@ -580,6 +630,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
       // Clean up peer connections on disconnect
       pendingIceRef.current.clear();
+      pendingOffersRef.current.clear();
       clearPeerConnections();
 
       // Only attempt reconnect for unexpected closures
@@ -616,6 +667,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       }
       isConnectingRef.current = false;
       pendingIceRef.current.clear();
+      pendingOffersRef.current.clear();
       clearPeerConnections();
     };
   }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);

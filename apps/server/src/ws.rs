@@ -74,7 +74,7 @@ async fn handle_socket(
         return;
     }
 
-    // Broadcast join to others
+    // Broadcast join to others (single-user update)
     let presence = state.get_presence_list(space_id).await;
     if let Some(user_presence) = presence.iter().find(|p| p.user_id == user_id) {
         let msg = WsMessage {
@@ -90,6 +90,21 @@ async fn handle_socket(
         };
         state.broadcast_to_space(space_id, &serde_json::to_string(&msg).unwrap(), Some(user_id)).await;
     }
+    // Broadcast full presence snapshot to everyone so all clients stay in sync (fixes avatars disappearing after rejoin)
+    let snapshot_msg = WsMessage {
+        msg_type: "server.presence.snapshot".to_string(),
+        payload: json!({
+            "presence": presence.iter().map(|p| json!({
+                "user_id": p.user_id,
+                "display_name": p.display_name,
+                "x": p.x,
+                "y": p.y,
+                "dir": p.dir,
+                "zone_id": p.zone_id
+            })).collect::<Vec<_>>()
+        }),
+    };
+    state.broadcast_to_space(space_id, &serde_json::to_string(&snapshot_msg).unwrap(), None).await;
 
     // Compute initial proximity
     let proximity_changes = state.compute_proximity(space_id).await;

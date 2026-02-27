@@ -76,6 +76,26 @@ The frontend will start at http://localhost:3000
 2. Enter a display name and click "Join as Guest"
 3. Click "Create Demo Space" to seed the database with a sample space and map
 
+## Production / Database URL
+
+The backend reads configuration from **environment variables**; values in the environment override `.env`.
+
+- **Where to set the production database URL**
+  - **Option A:** Put a `.env` file in `apps/server/` with:
+    ```bash
+    DATABASE_URL=postgres://user:password@your-host:5432/your_database
+    JWT_SECRET=your_secure_secret
+    CORS_ORIGIN=https://your-frontend-domain.com
+    ```
+  - **Option B:** Set the same variables in the environment when running the server (e.g. systemd, Docker, or your host). No `.env` file is required.
+
+- **Run the server** from `apps/server/` so `dotenvy` can find `.env` in the current directory:
+  ```bash
+  cd apps/server
+  cargo run --release
+  ```
+- Copy `apps/server/.env.example` to `apps/server/.env` and fill in your values. Do not commit `.env` (it is gitignored).
+
 ## Testing Proximity A/V
 
 1. Open two browser windows at http://localhost:3000

@@ -1,14 +1,14 @@
-'use client';
+"use client";
 
-import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
-import { useStore } from '@/store';
+import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { useStore } from "@/store";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080";
 
 export default function HomePage() {
   const router = useRouter();
-  
+
   // Use individual selectors to prevent re-renders
   const token = useStore((state) => state.token);
   const user = useStore((state) => state.user);
@@ -16,9 +16,9 @@ export default function HomePage() {
   const isHydrated = useStore((state) => state.isHydrated);
   const hydrate = useStore((state) => state.hydrate);
 
-  const [displayName, setDisplayName] = useState('');
+  const [displayName, setDisplayName] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
   const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
   const [seedingSpace, setSeedingSpace] = useState(false);
 
@@ -33,7 +33,7 @@ export default function HomePage() {
 
   const fetchSpaces = useCallback(async () => {
     const currentToken = useStore.getState().token;
-    if (!currentToken || typeof currentToken !== 'string') return;
+    if (!currentToken || typeof currentToken !== "string") return;
     try {
       const res = await fetch(`${API_BASE}/api/spaces`, {
         headers: {
@@ -49,7 +49,7 @@ export default function HomePage() {
         setSpaces(data);
       }
     } catch (err) {
-      console.error('Error fetching spaces:', err);
+      console.error("Error fetching spaces:", err);
     }
   }, [clearAuth]);
 
@@ -62,28 +62,28 @@ export default function HomePage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!displayName.trim()) {
-      setError('Please enter a display name');
+      setError("Please enter a display name");
       return;
     }
 
     setLoading(true);
-    setError('');
+    setError("");
 
     try {
       const res = await fetch(`${API_BASE}/api/auth/guest`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: displayName.trim() }),
       });
 
       if (!res.ok) {
-        throw new Error('Failed to create guest account');
+        throw new Error("Failed to create guest account");
       }
 
       const data = await res.json();
       setAuth(data.token, data.user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
     }
@@ -92,12 +92,12 @@ export default function HomePage() {
   const handleSeedSpace = async () => {
     setSeedingSpace(true);
     try {
-      const res = await fetch(`${API_BASE}/api/dev/seed`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/dev/seed`, { method: "POST" });
       if (res.ok) {
         fetchSpaces();
       }
     } catch (err) {
-      console.error('Error seeding space:', err);
+      console.error("Error seeding space:", err);
     } finally {
       setSeedingSpace(false);
     }
@@ -121,14 +121,17 @@ export default function HomePage() {
       <div className="min-h-screen flex items-center justify-center p-4">
         <div className="w-full max-w-md">
           <div className="bg-[var(--card)] rounded-2xl p-8 border border-[var(--border)]">
-            <h1 className="text-3xl font-bold text-center mb-2">Gather Clone</h1>
+            <h1 className="text-3xl font-bold text-center mb-2">Spheremeet</h1>
             <p className="text-[var(--muted)] text-center mb-8">
               Virtual office with proximity audio/video
             </p>
 
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
-                <label htmlFor="displayName" className="block text-sm font-medium mb-2">
+                <label
+                  htmlFor="displayName"
+                  className="block text-sm font-medium mb-2"
+                >
                   Display Name
                 </label>
                 <input
@@ -142,16 +145,14 @@ export default function HomePage() {
                 />
               </div>
 
-              {error && (
-                <p className="text-red-500 text-sm">{error}</p>
-              )}
+              {error && <p className="text-red-500 text-sm">{error}</p>}
 
               <button
                 type="submit"
                 disabled={loading}
                 className="w-full py-3 px-4 rounded-lg bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white font-medium transition-colors disabled:opacity-50"
               >
-                {loading ? 'Joining...' : 'Join as Guest'}
+                {loading ? "Joining..." : "Join as Guest"}
               </button>
             </form>
           </div>
@@ -166,7 +167,9 @@ export default function HomePage() {
         <div className="bg-[var(--card)] rounded-2xl p-8 border border-[var(--border)]">
           <div className="flex items-center justify-between mb-8">
             <div>
-              <h1 className="text-2xl font-bold">Welcome, {user.display_name}!</h1>
+              <h1 className="text-2xl font-bold">
+                Welcome, {user.display_name}!
+              </h1>
               <p className="text-[var(--muted)]">Select a space to join</p>
             </div>
             <button
@@ -174,7 +177,7 @@ export default function HomePage() {
               disabled={seedingSpace}
               className="px-4 py-2 rounded-lg bg-[var(--border)] hover:bg-[var(--card-hover)] text-sm transition-colors disabled:opacity-50"
             >
-              {seedingSpace ? 'Creating...' : '+ Create Demo Space'}
+              {seedingSpace ? "Creating..." : "+ Create Demo Space"}
             </button>
           </div>
 
@@ -196,7 +199,9 @@ export default function HomePage() {
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="font-semibold">{space.name}</h3>
-                      <p className="text-sm text-[var(--muted)]">Click to join</p>
+                      <p className="text-sm text-[var(--muted)]">
+                        Click to join
+                      </p>
                     </div>
                     <span className="text-[var(--primary)] group-hover:translate-x-1 transition-transform">
                       →

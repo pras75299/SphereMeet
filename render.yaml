@@ -1,0 +1,29 @@
+# Render Blueprint: backend only. Create a Web Service and link your repo.
+# In Render dashboard: New > Web Service, connect repo, then set:
+#
+# Root Directory:  apps/server
+# Environment:     Rust
+# Build Command:   cargo build --release
+# Start Command:   ./target/release/gather-server
+#
+# Required env vars (Dashboard > Environment):
+#   DATABASE_URL   - Postgres URL (e.g. from Render Postgres)
+#   JWT_SECRET     - Secret for signing tokens
+#   CORS_ORIGIN    - Frontend origin (e.g. https://your-app.onrender.com)
+#
+# PORT is set automatically by Render; do not set it.
+
+services:
+  - type: web
+    name: gather-backend
+    rootDir: apps/server
+    env: rust
+    buildCommand: cargo build --release
+    startCommand: ./target/release/gather-server
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        sync: false

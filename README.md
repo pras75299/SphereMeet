@@ -96,6 +96,23 @@ The backend reads configuration from **environment variables**; values in the en
   ```
 - Copy `apps/server/.env.example` to `apps/server/.env` and fill in your values. Do not commit `.env` (it is gitignored).
 
+## Deploy backend on Render
+
+1. **New Web Service** → connect your repo.
+2. **Root Directory:** `apps/server` (required).
+3. **Environment:** Rust.
+4. **Build Command:** `cargo build --release`
+5. **Start Command:** `./target/release/gather-server`  
+   Do not use `cargo run`; use the built binary so the server binds to Render’s `PORT`.
+6. **Environment variables** (Dashboard → Environment):
+   - `DATABASE_URL` – e.g. from Render Postgres (Internal URL).
+   - `JWT_SECRET` – any long random string.
+   - `CORS_ORIGIN` – your frontend URL (e.g. `https://your-app.onrender.com`).
+7. Do **not** set `PORT`; Render sets it automatically.
+8. Optional: **Health Check Path** = `/health`.
+
+If you see “Port scan timeout” or “no open ports”, check the **Logs** tab. If you see “Connecting to database…” then the process is failing on DB connect or migrations (e.g. missing or wrong `DATABASE_URL`). If the Start Command is not exactly `./target/release/gather-server`, fix it and redeploy.
+
 ## Testing Proximity A/V
 
 1. Open two browser windows at http://localhost:3000

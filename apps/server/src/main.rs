@@ -59,6 +59,8 @@ async fn main() {
     // Load .env from current directory (or set DATABASE_URL etc. in the environment for production)
     dotenvy::dotenv().ok();
 
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -66,6 +68,8 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    tracing::info!("PORT={} (will bind after DB is ready)", port);
 
     // DATABASE_URL: from .env in apps/server or from environment (env overrides .env)
     let mut database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (e.g. in .env or environment)");
@@ -144,7 +148,6 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

@@ -29,15 +29,21 @@ export default function HomePage() {
     }
   }, [isHydrated, hydrate]);
 
+  const clearAuth = useStore((state) => state.clearAuth);
+
   const fetchSpaces = useCallback(async () => {
     const currentToken = useStore.getState().token;
-    if (!currentToken) return;
+    if (!currentToken || typeof currentToken !== 'string') return;
     try {
       const res = await fetch(`${API_BASE}/api/spaces`, {
         headers: {
-          'Authorization': `Bearer ${currentToken}`,
+          Authorization: `Bearer ${currentToken}`,
         },
       });
+      if (res.status === 401) {
+        clearAuth();
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setSpaces(data);
@@ -45,13 +51,13 @@ export default function HomePage() {
     } catch (err) {
       console.error('Error fetching spaces:', err);
     }
-  }, []);
+  }, [clearAuth]);
 
   useEffect(() => {
-    if (token && user) {
+    if (isHydrated && token && user) {
       fetchSpaces();
     }
-  }, [token, user, fetchSpaces]);
+  }, [isHydrated, token, user, fetchSpaces]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

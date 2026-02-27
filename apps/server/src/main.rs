@@ -56,6 +56,7 @@ async fn readiness_check(
 
 #[tokio::main]
 async fn main() {
+    // Load .env from current directory (or set DATABASE_URL etc. in the environment for production)
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
@@ -66,7 +67,17 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // DATABASE_URL: from .env in apps/server or from environment (env overrides .env)
+    let mut database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (e.g. in .env or environment)");
+    // Cloud Postgres (Render, etc.) requires SSL. Add sslmode=require only for non-localhost.
+    // Local: postgres://...@localhost:5432/... uses no SSL. Production: gets sslmode=require.
+    if !database_url.contains("sslmode=") {
+        let is_local = database_url.contains("@localhost") || database_url.contains("@127.0.0.1");
+        if !is_local {
+            let sep = if database_url.contains('?') { "&" } else { "?" };
+            database_url.push_str(&format!("{}sslmode=require", sep));
+        }
+    }
     let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
     tracing::info!("Connecting to database...");

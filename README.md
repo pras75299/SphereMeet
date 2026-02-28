@@ -115,6 +115,16 @@ The backend reads configuration from **environment variables**; values in the en
 
 If you see “Port scan timeout” or “no open ports”, check the **Logs** tab. If you see “Connecting to database…” then the process is failing on DB connect or migrations (e.g. missing or wrong `DATABASE_URL`). If the Start Command is not exactly `./target/release/gather-server`, fix it and redeploy.
 
+## Deploy frontend on Vercel (use production backend)
+
+1. Push your repo and import the **web** app (or monorepo root) in Vercel.
+2. Set **Root Directory** to `apps/web` if you use the monorepo root.
+3. In **Settings → Environment Variables**, add:
+   - **`NEXT_PUBLIC_API_BASE`** = your backend URL, e.g. `https://spheremeet.onrender.com` (no trailing slash).
+4. Redeploy so the new env var is picked up (required for `NEXT_PUBLIC_*`).
+
+The frontend uses this for all API and WebSocket requests. Your backend must have **CORS_ORIGIN** set to your Vercel URL (e.g. `https://sphere-meet-eosin.vercel.app`).
+
 ## Testing Proximity A/V
 
 1. Open two browser windows at http://localhost:3000

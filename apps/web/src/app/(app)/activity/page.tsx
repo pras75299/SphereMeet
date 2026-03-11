@@ -99,12 +99,14 @@ function ActivityContent() {
 
       // Validate bounds
       if (newX < 0 || newX >= map.width || newY < 0 || newY >= map.height) {
+        sendMove(selfPresence.x, selfPresence.y, dir);
         return;
       }
 
       // Check blocked tiles
       const tileIndex = newY * map.width + newX;
       if (map.blocked.includes(tileIndex)) {
+        sendMove(selfPresence.x, selfPresence.y, dir);
         return;
       }
 

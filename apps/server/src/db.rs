@@ -302,13 +302,13 @@ pub async fn get_chat_messages(
     channel: &str,
     limit: i64,
 ) -> AppResult<Vec<ChatMessageWithUser>> {
-    let messages = sqlx::query_as::<_, (Uuid, Uuid, String, Uuid, String, String, Option<DateTime<Utc>>)>(
+    let mut messages = sqlx::query_as::<_, (Uuid, Uuid, String, Uuid, String, String, Option<DateTime<Utc>>)>(
         r#"
         SELECT cm.id, cm.space_id, cm.channel, cm.user_id, u.display_name, cm.body, cm.created_at
         FROM chat_messages cm
         JOIN users u ON cm.user_id = u.id
         WHERE cm.space_id = $1 AND cm.channel = $2
-        ORDER BY cm.created_at ASC
+        ORDER BY cm.created_at DESC
         LIMIT $3
         "#,
     )
@@ -317,6 +317,9 @@ pub async fn get_chat_messages(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+
+    // Reverse to return in chronological order (oldest first, but among the newest N messages)
+    messages.reverse();
 
     let result = messages
         .into_iter()

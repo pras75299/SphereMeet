@@ -135,7 +135,7 @@ async fn handle_socket(
                 msg = rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            if sender.send(Message::Text(msg.into())).await.is_err() {
+                            if sender.send(Message::Text(msg)).await.is_err() {
                                 break;
                             }
                         }
@@ -312,7 +312,7 @@ async fn send_joined_message(
     };
 
     sender
-        .send(Message::Text(serde_json::to_string(&msg)?.into()))
+        .send(Message::Text(serde_json::to_string(&msg)?))
         .await?;
 
     Ok(())
@@ -366,7 +366,7 @@ async fn handle_move(
     }
 
     // Validate move using cached data (no DB query!)
-    state.validate_move(space_id, x, y).await.map_err(|e| e)?;
+    state.validate_move(space_id, x, y).await?;
 
     // Find zone using cached data (no DB query!)
     let zone_id = state.find_zone_for_position(space_id, x, y).await;

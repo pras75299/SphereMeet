@@ -87,7 +87,6 @@ async fn main() {
             database_url.push_str(&format!("{}sslmode=require", sep));
         }
     }
-    let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
     let pool = PgPoolOptions::new()
         .max_connections(10)

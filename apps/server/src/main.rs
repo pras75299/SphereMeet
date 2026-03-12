@@ -87,7 +87,6 @@ async fn main() {
             database_url.push_str(&format!("{}sslmode=require", sep));
         }
     }
-    let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -101,13 +100,22 @@ async fn main() {
 
     let state = Arc::new(AppState::new(pool));
 
-    let cors_header = cors_origin.parse::<axum::http::HeaderValue>().unwrap_or_else(|e| {
-        tracing::error!("Invalid CORS_ORIGIN '{}': {:?}. Using default.", cors_origin, e);
-        "http://localhost:3000".parse().unwrap()
-    });
+    let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
+
+    let origins: Vec<axum::http::HeaderValue> = cors_origin
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                s.parse().ok()
+            }
+        })
+        .collect();
 
     let cors = CorsLayer::new()
-        .allow_origin(cors_header)
+        .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE])
         .allow_credentials(true);

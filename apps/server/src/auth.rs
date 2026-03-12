@@ -80,6 +80,7 @@ pub fn verify_token(token: &str) -> AppResult<Claims> {
 
 /// Authenticated user extractor for protected routes
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthUser {
     pub user_id: Uuid,
     pub display_name: String,
@@ -116,6 +117,7 @@ where
 
 /// Optional authenticated user - doesn't reject if no auth
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OptionalAuthUser(pub Option<AuthUser>);
 
 #[async_trait]

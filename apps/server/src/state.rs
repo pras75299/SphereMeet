@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
@@ -29,6 +31,7 @@ pub struct UserPresence {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClientConnection {
     pub user_id: Uuid,
     pub display_name: String,
@@ -52,6 +55,7 @@ pub struct CachedMapData {
 
 /// Cached zone data
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CachedZone {
     pub id: Uuid,
     pub name: Option<String>,
@@ -141,14 +145,14 @@ impl SpaceState {
 #[derive(Debug)]
 pub struct AppState {
     pub pool: PgPool,
-    pub spaces: RwLock<HashMap<Uuid, SpaceState>>,
+    pub spaces: DashMap<Uuid, Arc<RwLock<SpaceState>>>,
 }
 
 impl AppState {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            spaces: RwLock::new(HashMap::new()),
+            spaces: DashMap::new(),
         }
     }
 
@@ -159,8 +163,8 @@ impl AppState {
         display_name: String,
         sender: mpsc::Sender<String>,
     ) {
-        let mut spaces = self.spaces.write().await;
-        let space = spaces.entry(space_id).or_insert_with(SpaceState::new);
+        let space_arc = self.spaces.entry(space_id).or_insert_with(|| Arc::new(RwLock::new(SpaceState::new()))).clone();
+        let mut space = space_arc.write().await;
 
         // Initial position
         let (init_x, init_y) = (5, 5);
@@ -194,11 +198,12 @@ impl AppState {
     }
 
     pub async fn remove_client(&self, space_id: Uuid, user_id: Uuid) {
-        let mut spaces = self.spaces.write().await;
-        if let Some(space) = spaces.get_mut(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let mut space = space_arc.write().await;
             // Get position before removal for spatial grid
             if let Some(presence) = space.presence.get(&user_id) {
-                space.spatial_grid.remove(user_id, presence.x, presence.y);
+                let (px, py) = (presence.x, presence.y);
+                space.spatial_grid.remove(user_id, px, py);
             }
 
             space.clients.remove(&user_id);
@@ -212,7 +217,8 @@ impl AppState {
 
             // Clean up empty spaces to prevent memory leaks
             if space.clients.is_empty() {
-                spaces.remove(&space_id);
+                drop(space);
+                self.spaces.remove(&space_id);
             }
         }
     }
@@ -226,14 +232,26 @@ impl AppState {
         dir: &str,
         zone_id: Option<Uuid>,
     ) {
-        let mut spaces = self.spaces.write().await;
-        if let Some(space) = spaces.get_mut(&space_id) {
-            if let Some(presence) = space.presence.get_mut(&user_id) {
-                // Update spatial grid if position changed
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let mut space = space_arc.write().await;
+            
+            let mut update_spatial = false;
+            let mut px = 0;
+            let mut py = 0;
+            
+            if let Some(presence) = space.presence.get(&user_id) {
                 if presence.x != x || presence.y != y {
-                    space.spatial_grid.update(user_id, presence.x, presence.y, x, y);
+                    px = presence.x;
+                    py = presence.y;
+                    update_spatial = true;
                 }
+            }
+            
+            if update_spatial {
+                space.spatial_grid.update(user_id, px, py, x, y);
+            }
 
+            if let Some(presence) = space.presence.get_mut(&user_id) {
                 presence.x = x;
                 presence.y = y;
                 presence.dir = dir.to_string();
@@ -244,8 +262,8 @@ impl AppState {
     }
 
     pub async fn get_presence_list(&self, space_id: Uuid) -> Vec<UserPresence> {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             space.presence.values().cloned().collect()
         } else {
             Vec::new()
@@ -253,8 +271,8 @@ impl AppState {
     }
 
     pub async fn get_client_sender(&self, space_id: Uuid, user_id: Uuid) -> Option<mpsc::Sender<String>> {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             space.clients.get(&user_id).map(|c| c.sender.clone())
         } else {
             None
@@ -262,10 +280,10 @@ impl AppState {
     }
 
     pub async fn broadcast_to_space(&self, space_id: Uuid, message: &str, exclude_user: Option<Uuid>) {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             for (uid, client) in &space.clients {
-                if exclude_user.map_or(true, |exc| exc != *uid) {
+                if exclude_user != Some(*uid) {
                     // Use try_send to avoid blocking on slow clients
                     if let Err(e) = client.sender.try_send(message.to_string()) {
                         tracing::warn!("Failed to send message to client {}: {:?}", uid, e);
@@ -277,11 +295,11 @@ impl AppState {
 
     /// Compute proximity using spatial grid for O(k) instead of O(n²)
     pub async fn compute_proximity(&self, space_id: Uuid) -> HashMap<Uuid, HashSet<Uuid>> {
-        let mut spaces = self.spaces.write().await;
-        let space = match spaces.get_mut(&space_id) {
-            Some(s) => s,
+        let space_arc = match self.spaces.get(&space_id) {
+            Some(s) => s.clone(),
             None => return HashMap::new(),
         };
+        let mut space = space_arc.write().await;
 
         let mut new_proximity: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
 
@@ -311,7 +329,7 @@ impl AppState {
                     let was_in_proximity = space
                         .proximity_cache
                         .get(user_id)
-                        .map_or(false, |entry| entry.peers.contains(&other_id));
+                        .is_some_and(|entry| entry.peers.contains(&other_id));
 
                     // Hysteresis: enter at RADIUS_TILES, exit at HYSTERESIS_OUT_TILES
                     let in_range = if was_in_proximity {
@@ -371,8 +389,8 @@ impl AppState {
     }
 
     pub async fn is_in_proximity(&self, space_id: Uuid, user1: Uuid, user2: Uuid) -> bool {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             if let Some(entry) = space.proximity_cache.get(&user1) {
                 return entry.peers.contains(&user2);
             }
@@ -381,8 +399,8 @@ impl AppState {
     }
 
     pub async fn get_proximity_last_updated(&self, space_id: Uuid, user_id: Uuid) -> Option<DateTime<Utc>> {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             space.proximity_cache.get(&user_id).map(|e| e.last_updated)
         } else {
             None
@@ -391,42 +409,48 @@ impl AppState {
 
     /// Cache map data for a space
     pub async fn cache_map_data(&self, space_id: Uuid, map: CachedMapData) {
-        let mut spaces = self.spaces.write().await;
-        if let Some(space) = spaces.get_mut(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let mut space = space_arc.write().await;
             space.cached_map = Some(map);
         }
     }
 
     /// Cache zones for a space
     pub async fn cache_zones(&self, space_id: Uuid, zones: Vec<CachedZone>) {
-        let mut spaces = self.spaces.write().await;
-        if let Some(space) = spaces.get_mut(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let mut space = space_arc.write().await;
             space.cached_zones = zones;
         }
     }
 
     /// Get cached map data
+    #[allow(dead_code)]
     pub async fn get_cached_map(&self, space_id: Uuid) -> Option<CachedMapData> {
-        let spaces = self.spaces.read().await;
-        spaces.get(&space_id).and_then(|s| s.cached_map.clone())
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
+            space.cached_map.clone()
+        } else {
+            None
+        }
     }
 
     /// Get cached zones
+    #[allow(dead_code)]
     pub async fn get_cached_zones(&self, space_id: Uuid) -> Vec<CachedZone> {
-        let spaces = self.spaces.read().await;
-        spaces
-            .get(&space_id)
-            .map(|s| s.cached_zones.clone())
-            .unwrap_or_default()
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
+            space.cached_zones.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Validate move against cached map data
     /// Returns error if space doesn't exist, map is not cached, or position is invalid
     pub async fn validate_move(&self, space_id: Uuid, x: i32, y: i32) -> Result<(), &'static str> {
-        let spaces = self.spaces.read().await;
-        
         // Fail if space doesn't exist
-        let space = spaces.get(&space_id).ok_or("Space not found")?;
+        let space_arc = self.spaces.get(&space_id).ok_or("Space not found")?.clone();
+        let space = space_arc.read().await;
         
         // Fail if map is not cached - this means the space setup is incomplete
         // The map should always be cached when a user joins via send_joined_message
@@ -448,8 +472,8 @@ impl AppState {
 
     /// Find zone for position using cached data
     pub async fn find_zone_for_position(&self, space_id: Uuid, x: i32, y: i32) -> Option<Uuid> {
-        let spaces = self.spaces.read().await;
-        if let Some(space) = spaces.get(&space_id) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
             for zone in &space.cached_zones {
                 if x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h {
                     return Some(zone.id);

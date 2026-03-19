@@ -47,47 +47,70 @@ function NavContent({ children }: { children: React.ReactNode }) {
   // Show loading while hydrating or if not authenticated
   if (!isHydrated || !token || !user) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-[var(--muted)]">Loading...</div>
+      <div className="min-h-screen flex items-center justify-center bg-[var(--background)]">
+        <p className="pixel-mono text-[var(--secondary)] text-sm animate-pulse tracking-widest uppercase">
+          BOOT_SEQUENCE...
+        </p>
       </div>
     );
   }
 
   return (
     <WebSocketProvider spaceId={spaceId}>
-      <div className="min-h-screen flex flex-col">
-        <header className="bg-[var(--card)] border-b border-[var(--border)] px-4 py-3 flex-shrink-0">
-          <div className="flex items-center justify-between max-w-7xl mx-auto">
-            <div className="flex items-center gap-6">
-              <h1 className="text-lg font-semibold">{spaceName || 'Loading...'}</h1>
-              <nav className="flex gap-1">
-                {tabs.map((tab) => {
-                  const isActive = pathname === tab.href.split('?')[0];
-                  return (
-                    <button
-                      key={tab.name}
-                      onClick={() => router.push(tab.href)}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                        isActive
-                          ? 'bg-[var(--primary)] text-white'
-                          : 'text-[var(--muted)] hover:text-white hover:bg-[var(--card-hover)]'
-                      }`}
-                    >
-                      {tab.name}
-                    </button>
-                  );
-                })}
-              </nav>
-            </div>
-            <div className="flex items-center gap-4">
-              <span className="text-sm text-[var(--muted)]">{user.display_name}</span>
-              <button
-                onClick={handleLogout}
-                className="px-3 py-1.5 rounded-lg text-sm text-[var(--muted)] hover:text-white hover:bg-[var(--card-hover)] transition-colors"
+      <div className="min-h-screen flex flex-col bg-[var(--background)]">
+        <header
+          className="flex-shrink-0 px-4 py-2 flex items-center justify-between"
+          style={{
+            background: "var(--surface-mid)",
+            borderBottom: "2px solid var(--outline-dim)",
+          }}
+        >
+          <div className="flex items-center gap-6 max-w-7xl">
+            <div className="flex items-center gap-2">
+              <span className="pixel-badge-on" />
+              <h1
+                className="pixel-mono text-sm tracking-widest font-bold uppercase"
+                style={{ color: "var(--secondary-lit)" }}
               >
-                Logout
-              </button>
+                {spaceName || 'CONNECTING...'}
+              </h1>
             </div>
+            <nav className="flex gap-2">
+              {tabs.map((tab) => {
+                const isActive = pathname === tab.href.split('?')[0];
+                return (
+                  <button
+                    key={tab.name}
+                    onClick={() => router.push(tab.href)}
+                    className="pixel-btn px-3 py-1.5 pixel-mono text-[10px] uppercase tracking-widest transition-all"
+                    style={{
+                      background: isActive ? "var(--primary)" : "var(--surface-lowest)",
+                      color: isActive ? "#fff" : "var(--muted)",
+                      borderBottom: isActive ? "2px solid #312e81" : "2px solid var(--surface-low)",
+                      opacity: isActive ? 1 : 0.7,
+                    }}
+                  >
+                    {tab.name}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="pixel-mono text-[10px] text-[var(--muted)] uppercase tracking-widest">
+              OP: <span style={{ color: "var(--foreground)" }}>{user.display_name}</span>
+            </span>
+            <button
+              onClick={handleLogout}
+              className="pixel-btn px-3 py-1.5 pixel-mono text-[10px] uppercase tracking-widest"
+              style={{
+                background: "#7f1d1d",
+                color: "#fca5a5",
+                borderBottom: "2px solid #450a0a",
+              }}
+            >
+              LOGOUT
+            </button>
           </div>
         </header>
         <main className="flex-1 overflow-hidden">

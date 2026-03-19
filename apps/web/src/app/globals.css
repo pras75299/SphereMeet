@@ -1,43 +1,151 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────────────────────
+   Bit-Level Office — Design System Tokens
+   Extracted from Stitch MCP "SphereMeet Pixel Art" project
+   ───────────────────────────────────────────────────────── */
 :root {
-  --background: #0f0f0f;
-  --foreground: #ededed;
-  --primary: #6366f1;
-  --primary-hover: #4f46e5;
-  --card: #1a1a1a;
-  --card-hover: #252525;
-  --border: #2a2a2a;
-  --muted: #6b7280;
+  /* Core surfaces */
+  --background:            #0b0f19;
+  --surface:               #0f131d;
+  --surface-low:           #171b26;
+  --surface-mid:           #1c1f2a;
+  --surface-high:          #262a35;
+  --surface-highest:       #313540;
+
+  /* Interactive */
+  --foreground:            #dfe2f1;
+  --muted:                 #c7c4d7;
+  --outline:               #908fa0;
+  --outline-dim:           #464554;
+
+  /* Primary — indigo glow */
+  --primary:               #6366f1;
+  --primary-hover:         #4f46e5;
+  --primary-lit:           #c0c1ff;
+  --primary-container:     #8083ff;
+
+  /* Secondary — amber "golden actions" */
+  --secondary:             #facc15;
+  --secondary-lit:         #ffe083;
+  --secondary-container:   #eec200;
+
+  /* Tertiary — pink accent */
+  --tertiary:              #fb7185;
+  --tertiary-container:    #ea6479;
+
+  /* Semantic aliases (kept for legacy code compat) */
+  --card:                  var(--surface-mid);
+  --card-hover:            var(--surface-high);
+  --border:                var(--outline-dim);
+
+  /* ── Pixel-art floor palettes ── */
+  --pixel-floor-corridor-a: #111827;
+  --pixel-floor-corridor-b: #1f2933;
+  --pixel-floor-kitchen-a:  #3b2f2a;
+  --pixel-floor-kitchen-b:  #4b3a30;
+  --pixel-floor-cafe-a:     #123641;
+  --pixel-floor-cafe-b:     #0f2a34;
+  --pixel-floor-meeting:    #101827;
+  --pixel-floor-lounge-a:   #22172b;
+  --pixel-floor-lounge-b:   #2d1f3a;
+  --pixel-wall:             #020617;
+
+  /* ── Pixel-art avatar palette ── */
+  --pixel-avatar-self:      #6366f1;
+  --pixel-avatar-nearby:    #22c55e;
+  --pixel-avatar-idle:      #4b5563;
+  --pixel-avatar-outline:   #020617;
+  --pixel-avatar-head:      #f9fafb;
+
+  /* ── Zone HUD ── */
+  --pixel-zone-stroke:      #4b5563;
+  --pixel-zone-active:      #facc15;
+  --pixel-zone-label:       #9ca3af;
 }
 
+/* ─────────────────────────────────────────────────────────
+   Base styles — Bit-Level Office
+   ───────────────────────────────────────────────────────── */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  /* CRT scanline overlay — 3% */
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
 }
 
 * {
   box-sizing: border-box;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
+/* ─────────────────────────────────────────────────────────
+   Pixel-art utility classes
+   ───────────────────────────────────────────────────────── */
+
+/* Hard 4px pixel-offset shadow (not blurred) */
+.pixel-shadow {
+  box-shadow: 4px 4px 0 var(--surface-low);
+}
+
+/* 3D tactile button effect */
+.pixel-btn {
+  border-radius: 0;
+  border-bottom: 4px solid color-mix(in srgb, var(--primary) 50%, black);
+  transition: transform 80ms, border-bottom-width 80ms;
+}
+.pixel-btn:active {
+  transform: translateY(2px);
+  border-bottom-width: 2px;
+}
+
+/* Corner-bracket border (L-shape corners only, no full box) */
+.pixel-frame {
+  position: relative;
+}
+.pixel-frame::before,
+.pixel-frame::after {
+  content: '';
+  position: absolute;
   width: 8px;
   height: 8px;
+  border-color: var(--secondary);
+  border-style: solid;
+}
+.pixel-frame::before {
+  top: 0; left: 0;
+  border-width: 2px 0 0 2px;
+}
+.pixel-frame::after {
+  bottom: 0; right: 0;
+  border-width: 0 2px 2px 0;
 }
 
-::-webkit-scrollbar-track {
-  background: var(--background);
+/* Retro monospace for status readouts */
+.pixel-mono {
+  font-family: 'Share Tech Mono', monospace;
+  letter-spacing: 0.04em;
 }
 
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
+/* Status pixel badge */
+.pixel-badge-on  { display: inline-block; width: 6px; height: 6px; background: #22c55e; }
+.pixel-badge-off { display: inline-block; width: 6px; height: 6px; background: #ef4444; }
+.pixel-badge-warn{ display: inline-block; width: 6px; height: 6px; background: #facc15; }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--muted);
-}
+/* ─────────────────────────────────────────────────────────
+   Custom scrollbar — pixel style
+   ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--outline-dim); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--outline); }

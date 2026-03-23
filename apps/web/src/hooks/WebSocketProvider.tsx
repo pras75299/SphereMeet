@@ -1,7 +1,7 @@
 'use client';
 
 import { createContext, useContext, useCallback, useEffect, useRef, useState, ReactNode } from 'react';
-import { useStore } from '@/store';
+import { useStore, canonicalUserId } from '@/store';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 
@@ -49,7 +49,12 @@ interface JoinedPayload {
     dir: string;
     zone_id: string | null;
   }>;
+  /** user_id -> "proximity" | "space" */
+  av_scopes?: Record<string, string>;
 }
+
+/** Max concurrent mesh peers in Meetings (full-space) mode — mesh cost is O(n²). */
+const MAX_SPACE_MESH_PEERS = 15;
 
 interface PresenceUpdatePayload {
   user_id: string;
@@ -126,6 +131,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const removePresence = useStore((state) => state.removePresence);
   const setProximityPeers = useStore((state) => state.setProximityPeers);
   const proximityPeers = useStore((state) => state.proximityPeers);
+  const avScope = useStore((state) => state.avScope);
+  const peerAvScopes = useStore((state) => state.peerAvScopes);
+  const presence = useStore((state) => state.presence);
+  const setPeerAvScopesFromJoined = useStore((state) => state.setPeerAvScopesFromJoined);
+  const patchPeerAvScope = useStore((state) => state.patchPeerAvScope);
   const addChatMessage = useStore((state) => state.addChatMessage);
   const setWs = useStore((state) => state.setWs);
   const setWsConnected = useStore((state) => state.setWsConnected);
@@ -172,6 +182,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
   const createPeerConnection = useCallback(
     (peerId: string, isInitiator: boolean): RTCPeerConnection | null => {
+      peerId = canonicalUserId(peerId);
       const currentUser = userRef.current;
       const currentLocalStream = localStreamRef.current;
       
@@ -322,33 +333,50 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
                 : null,
               payload.zones
             );
-            setPresence(
-              payload.presence.map((p) => ({
-                user_id: p.user_id,
-                display_name: p.display_name,
-                x: p.x,
-                y: p.y,
-                dir: p.dir as 'up' | 'down' | 'left' | 'right',
-                zone_id: p.zone_id,
-              }))
-            );
+            const selfId = canonicalUserId(payload.self.user_id);
+            const presenceRows = payload.presence.map((p) => ({
+              user_id: p.user_id,
+              display_name: p.display_name,
+              x: p.x,
+              y: p.y,
+              dir: p.dir as 'up' | 'down' | 'left' | 'right',
+              zone_id: p.zone_id,
+            }));
+            if (!presenceRows.some((p) => canonicalUserId(p.user_id) === selfId)) {
+              presenceRows.push({
+                user_id: selfId,
+                display_name: payload.self.display_name,
+                x: 5,
+                y: 5,
+                dir: 'down',
+                zone_id: null,
+              });
+            }
+            setPresence(presenceRows);
+            if (payload.av_scopes && typeof payload.av_scopes === 'object') {
+              setPeerAvScopesFromJoined(payload.av_scopes);
+            }
             break;
           }
           case 'server.presence.update': {
             const payload = message.payload as PresenceUpdatePayload;
+            const dn =
+              typeof payload.display_name === 'string' && payload.display_name.trim().length > 0
+                ? payload.display_name.trim()
+                : undefined;
             updatePresence({
-              user_id: payload.user_id,
-              display_name: payload.display_name || '',
+              user_id: canonicalUserId(payload.user_id),
               x: payload.x,
               y: payload.y,
               dir: payload.dir as 'up' | 'down' | 'left' | 'right',
               zone_id: payload.zone_id,
+              ...(dn !== undefined ? { display_name: dn } : {}),
             });
             break;
           }
           case 'server.presence.leave': {
             const payload = message.payload as PresenceLeavePayload;
-            removePresence(payload.user_id);
+            removePresence(canonicalUserId(payload.user_id));
             break;
           }
           case 'server.presence.snapshot': {
@@ -374,45 +402,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
           }
           case 'server.proximity': {
             const payload = message.payload as ProximityPayload;
-            const currentUser = userRef.current;
-            const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
-            const currentLocalStream = localStreamRef.current;
-
-            console.log('[Proximity] Update received:', {
-              peers: payload.peers,
-              avEnabled: currentNearbyAvEnabled,
-              hasStream: !!currentLocalStream
-            });
-
-            // Always update proximity peers list
             setProximityPeers(payload.peers);
-
-            // Only manage WebRTC connections if A/V is enabled
-            if (currentUser && currentNearbyAvEnabled && currentLocalStream) {
-              const desiredPeers = new Set(payload.peers);
-              const currentPeers = new Set(useStore.getState().peerConnections.keys());
-
-              console.log('[Proximity] Managing WebRTC connections:', {
-                desiredPeers: Array.from(desiredPeers),
-                currentPeers: Array.from(currentPeers)
-              });
-
-              // Connect to new peers
-              desiredPeers.forEach((peerId) => {
-                if (!currentPeers.has(peerId)) {
-                  const isInitiator = currentUser.id < peerId;
-                  createPeerConnection(peerId, isInitiator);
-                }
-              });
-
-              // Disconnect from peers no longer in range
-              currentPeers.forEach((peerId) => {
-                if (!desiredPeers.has(peerId)) {
-                  pendingIceRef.current.delete(peerId);
-                  pendingOffersRef.current.delete(peerId);
-                  removePeerConnection(peerId);
-                }
-              });
+            break;
+          }
+          case 'server.av.scope_changed': {
+            const payload = message.payload as { user_id?: string; scope?: string };
+            if (
+              payload.user_id &&
+              (payload.scope === 'space' || payload.scope === 'proximity')
+            ) {
+              patchPeerAvScope(canonicalUserId(payload.user_id), payload.scope);
             }
             break;
           }
@@ -535,9 +534,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       setSpace,
       setMap,
       setPresence,
+      setPeerAvScopesFromJoined,
       updatePresence,
       removePresence,
       setProximityPeers,
+      patchPeerAvScope,
       addChatMessage,
       createPeerConnection,
       removePeerConnection,
@@ -549,19 +550,46 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const handleMessageRef = useRef(handleMessage);
   handleMessageRef.current = handleMessage;
 
-  // When user enables A/V: create peer connections for proximity peers and process any offers we received while A/V was off
+  /**
+   * Single place for WebRTC peer set: Activity uses server `proximityPeers`;
+   * Meetings uses everyone in `peerAvScopes` with `space` (capped).
+   */
   useEffect(() => {
     const state = useStore.getState();
-    const { user: currentUser, nearbyAvEnabled: enabled, localStream: stream, peerConnections: conns } = state;
+    const {
+      user: currentUser,
+      nearbyAvEnabled: enabled,
+      localStream: stream,
+      peerConnections: conns,
+      avScope: mode,
+      peerAvScopes: scopes,
+      proximityPeers: proxPeers,
+      presence: pres,
+    } = state;
     if (!currentUser || !enabled || !stream) return;
 
+    let desiredList: string[];
+    if (mode === 'space') {
+      desiredList = Array.from(pres.keys())
+        .filter((id) => id !== currentUser.id && scopes[id] === 'space')
+        .sort()
+        .slice(0, MAX_SPACE_MESH_PEERS);
+    } else {
+      desiredList = [...proxPeers];
+    }
+
+    const desiredPeers = new Set(desiredList);
     const currentPeers = new Set(conns.keys());
-    const desiredPeers = new Set(proximityPeers);
+
+    console.log('[WebRTC] Sync peers', {
+      mode,
+      desired: desiredList,
+      current: Array.from(currentPeers),
+    });
 
     desiredPeers.forEach((peerId) => {
       if (!currentPeers.has(peerId)) {
         const isInitiator = currentUser.id < peerId;
-        console.log('[Proximity] A/V just enabled – creating peer connection to', peerId);
         createPeerConnection(peerId, isInitiator);
       }
     });
@@ -574,12 +602,15 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       }
     });
 
-    // Process offers that arrived while A/V was disabled
     const offersCopy = new Map(pendingOffersRef.current);
     pendingOffersRef.current.clear();
     offersCopy.forEach(({ sdp }, fromUserId) => {
       const connsNow = useStore.getState().peerConnections;
       if (connsNow.has(fromUserId)) return;
+      if (!desiredPeers.has(fromUserId)) {
+        pendingOffersRef.current.set(fromUserId, { sdp });
+        return;
+      }
       const pc = createPeerConnection(fromUserId, false);
       if (!pc) return;
       pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
@@ -599,7 +630,19 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
         })
         .catch((err) => console.error('[WebRTC] Error processing pending offer:', err));
     });
-  }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection, getWs, drainIceQueue]);
+  }, [
+    nearbyAvEnabled,
+    localStream,
+    user?.id,
+    avScope,
+    peerAvScopes,
+    proximityPeers,
+    presence,
+    createPeerConnection,
+    removePeerConnection,
+    getWs,
+    drainIceQueue,
+  ]);
 
   // Main connection effect (token + spaceId + wsReconnectTick; message handler via ref)
   useEffect(() => {

@@ -1,75 +1,111 @@
 'use client';
 
-import { useEffect, useState, useCallback, Suspense, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, Suspense } from 'react';
 import { useStore } from '@/store';
+import { useWebSocketContext } from '@/hooks/WebSocketProvider';
 
-/** Pixel-office video room: 32px-grid inspired blocks, high-contrast (see .agent/skills/pixelart/skill.md). */
+/** SphereMeet / Stitch: retro terminal grid, indigo–amber accents, 0-radius frames. */
 
 function MeetingsContent() {
   const [inMeeting, setInMeeting] = useState(false);
-  const [meetingStream, setMeetingStream] = useState<MediaStream | null>(null);
+  const inMeetingRef = useRef(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
 
   const user = useStore((state) => state.user);
   const presence = useStore((state) => state.presence);
   const peerConnections = useStore((state) => state.peerConnections);
+  const localStream = useStore((state) => state.localStream);
+  const setLocalStream = useStore((state) => state.setLocalStream);
+  const setNearbyAvEnabled = useStore((state) => state.setNearbyAvEnabled);
+  const setAvScope = useStore((state) => state.setAvScope);
+  const clearPeerConnections = useStore((state) => state.clearPeerConnections);
+  const { sendMessage } = useWebSocketContext();
+
+  useEffect(() => {
+    inMeetingRef.current = inMeeting;
+  }, [inMeeting]);
+
+  const leaveMeetingSession = useCallback(() => {
+    sendMessage('client.av.scope', { scope: 'proximity' });
+    const stream = useStore.getState().localStream;
+    stream?.getTracks().forEach((track) => track.stop());
+    setLocalStream(null);
+    setNearbyAvEnabled(false);
+    setAvScope('proximity');
+    clearPeerConnections();
+    setInMeeting(false);
+    setIsMuted(false);
+    setIsVideoOff(false);
+  }, [
+    sendMessage,
+    setLocalStream,
+    setNearbyAvEnabled,
+    setAvScope,
+    clearPeerConnections,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (!inMeetingRef.current) return;
+      const s = useStore.getState();
+      s.ws?.send(JSON.stringify({ type: 'client.av.scope', payload: { scope: 'proximity' } }));
+      s.localStream?.getTracks().forEach((track) => track.stop());
+      s.setLocalStream(null);
+      s.setNearbyAvEnabled(false);
+      s.setAvScope('proximity');
+      s.clearPeerConnections();
+    };
+  }, []);
 
   const handleJoinMeeting = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true,
-      });
-      setMeetingStream(stream);
+      let stream = useStore.getState().localStream;
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        setLocalStream(stream);
+      }
+      setNearbyAvEnabled(true);
+      setAvScope('space');
+      sendMessage('client.av.scope', { scope: 'space' });
       setInMeeting(true);
     } catch (err) {
       console.error('Error accessing media devices:', err);
       alert('Could not access camera/microphone');
     }
-  }, []);
-
-  const handleLeaveMeeting = useCallback(() => {
-    if (meetingStream) {
-      meetingStream.getTracks().forEach((track) => track.stop());
-      setMeetingStream(null);
-    }
-    setInMeeting(false);
-    setIsMuted(false);
-    setIsVideoOff(false);
-  }, [meetingStream]);
+  }, [setLocalStream, setNearbyAvEnabled, setAvScope, sendMessage]);
 
   const handleToggleMute = useCallback(() => {
-    if (meetingStream) {
-      const audioTrack = meetingStream.getAudioTracks()[0];
+    const stream = useStore.getState().localStream;
+    if (stream) {
+      const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMuted(!audioTrack.enabled);
       }
     }
-  }, [meetingStream]);
+  }, []);
 
   const handleToggleVideo = useCallback(() => {
-    if (meetingStream) {
-      const videoTrack = meetingStream.getVideoTracks()[0];
+    const stream = useStore.getState().localStream;
+    if (stream) {
+      const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsVideoOff(!videoTrack.enabled);
       }
     }
-  }, [meetingStream]);
+  }, []);
 
-  useEffect(() => {
-    return () => {
-      if (meetingStream) {
-        meetingStream.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, [meetingStream]);
+  const remoteParticipants = useMemo(() => {
+    if (!user) return [];
+    return Array.from(presence.values())
+      .filter((p) => p.user_id !== user.id)
+      .sort((a, b) => a.user_id.localeCompare(b.user_id))
+      .slice(0, 5);
+  }, [presence, user]);
 
-  const participants = useMemo(() => {
-    return Array.from(presence.values()).slice(0, 5);
-  }, [presence]);
+  const emptySlots = Math.max(0, 5 - remoteParticipants.length);
 
   if (!inMeeting) {
     return (
@@ -86,7 +122,7 @@ function MeetingsContent() {
           </span>
           <span className="flex items-center gap-2 pixel-mono text-[9px] uppercase tracking-wider text-[var(--muted)]">
             <span className="pixel-badge-on" aria-hidden />
-            ready
+            full-space video
           </span>
         </header>
         <div className="flex min-h-0 flex-1 items-center justify-center p-6">
@@ -111,7 +147,9 @@ function MeetingsContent() {
               Meeting grid
             </h2>
             <p className="pixel-mono mb-8 text-xs leading-relaxed text-[#c7c4d7]">
-              Full-space video for this office. Everyone in the meeting sees each other — no proximity limit (unlike Activity).
+              Video with everyone in this office who joins the meeting — not limited by map proximity.
+              Uses the same WebRTC path as Activity; the server allows signaling for all &quot;space&quot;
+              A/V peers.
             </p>
             <button
               type="button"
@@ -147,19 +185,19 @@ function MeetingsContent() {
           SphereMeet
         </span>
         <span className="pixel-mono text-[9px] uppercase tracking-wider text-[#c7c4d7]">
-          &gt; IN_SESSION
+          &gt; IN_SESSION · SPACE_MESH
         </span>
       </header>
       <div className="min-h-0 flex-1 p-3 sm:p-4">
         <div className="mx-auto grid h-full max-w-6xl grid-cols-2 grid-rows-3 gap-3 sm:grid-cols-3 sm:grid-rows-2 sm:gap-4">
           <div className={tileClass}>
-            {meetingStream && !isVideoOff ? (
+            {localStream && !isVideoOff ? (
               <video
                 autoPlay
                 muted
                 playsInline
                 ref={(el) => {
-                  if (el && meetingStream) el.srcObject = meetingStream;
+                  if (el && localStream) el.srcObject = localStream;
                 }}
                 className="h-full w-full object-cover"
                 style={{ imageRendering: 'pixelated' }}
@@ -191,8 +229,7 @@ function MeetingsContent() {
             )}
           </div>
 
-          {participants.map((participant) => {
-            if (participant.user_id === user?.id) return null;
+          {remoteParticipants.map((participant) => {
             const peerConn = peerConnections.get(participant.user_id);
             return (
               <div key={participant.user_id} className={tileClass}>
@@ -206,8 +243,11 @@ function MeetingsContent() {
                     className="h-full w-full object-cover"
                   />
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-[#1e293b]">
-                    <div className="flex h-20 w-20 items-center justify-center border-4 border-slate-950 bg-slate-600 text-lg font-bold text-white" style={{ fontFamily: "'Share Tech Mono', monospace" }}>
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-[#1e293b] px-2">
+                    <div
+                      className="flex h-20 w-20 shrink-0 items-center justify-center border-4 border-slate-950 bg-slate-600 text-lg font-bold text-white"
+                      style={{ fontFamily: "'Share Tech Mono', monospace" }}
+                    >
                       {participant.display_name
                         .split(' ')
                         .map((n) => n[0])
@@ -215,6 +255,9 @@ function MeetingsContent() {
                         .toUpperCase()
                         .slice(0, 2)}
                     </div>
+                    <span className="pixel-mono text-[9px] uppercase tracking-wider text-[var(--outline)] text-center">
+                      {peerConn ? 'connecting…' : 'waiting for peer'}
+                    </span>
                   </div>
                 )}
                 <div className="absolute bottom-0 left-0 right-0 border-t-2 border-slate-950 bg-black/75 px-2 py-1 pixel-mono text-[10px] uppercase tracking-wider text-[#dfe2eb]">
@@ -224,7 +267,7 @@ function MeetingsContent() {
             );
           })}
 
-          {Array.from({ length: Math.max(0, 5 - participants.length) }).map((_, i) => (
+          {Array.from({ length: emptySlots }).map((_, i) => (
             <div
               key={`empty-${i}`}
               className="flex items-center justify-center border-4 border-dashed border-slate-700 bg-[var(--surface-low)]"
@@ -271,7 +314,7 @@ function MeetingsContent() {
 
         <button
           type="button"
-          onClick={handleLeaveMeeting}
+          onClick={leaveMeetingSession}
           className="pixel-btn px-6 py-2 pixel-mono text-xs font-bold uppercase tracking-widest"
           style={{
             background: '#ef4444',

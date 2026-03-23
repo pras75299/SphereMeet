@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use crate::auth::verify_token;
 use crate::db;
-use crate::state::{AppState, CachedMapData, CachedZone, CHANNEL_CAPACITY, PROXIMITY_SIGNAL_GRACE_MS};
+use crate::state::{
+    AppState, AvScope, CachedMapData, CachedZone, CHANNEL_CAPACITY, PROXIMITY_SIGNAL_GRACE_MS,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
@@ -325,6 +327,8 @@ async fn send_joined_message(
     }).collect();
     state.cache_zones(space_id, cached_zones).await;
 
+    let av_scopes = state.av_scopes_json_for_space(space_id).await;
+
     let msg = WsMessage {
         msg_type: "server.joined".to_string(),
         payload: json!({
@@ -358,7 +362,8 @@ async fn send_joined_message(
                 "y": p.y,
                 "dir": p.dir,
                 "zone_id": p.zone_id
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "av_scopes": av_scopes
         }),
     };
 
@@ -383,6 +388,9 @@ async fn handle_client_message(
         }
         "client.chat.send" => {
             handle_chat_send(state, user_id, space_id, &msg.payload).await?;
+        }
+        "client.av.scope" => {
+            handle_av_scope(state, user_id, space_id, &msg.payload).await?;
         }
         "client.webrtc.offer" => {
             handle_webrtc_signal(state, user_id, space_id, "server.webrtc.offer", &msg.payload).await?;
@@ -436,16 +444,9 @@ async fn handle_move(
     // Update presence
     state.update_presence(space_id, user_id, x, y, dir, zone_id).await;
 
-    // Get display_name for broadcast
-    let display_name = {
-        let presence_list = state.get_presence_list(space_id).await;
-        presence_list
-            .iter()
-            .find(|p| p.user_id == user_id)
-            .map(|p| p.display_name.clone())
-    };
+    let display_name = state.display_name_for_user(space_id, user_id).await;
 
-    // Broadcast position update
+    // Broadcast position update (always send string so clients never overwrite with null → "Unknown")
     let msg = WsMessage {
         msg_type: "server.presence.update".to_string(),
         payload: json!({
@@ -522,6 +523,37 @@ async fn handle_chat_send(
     Ok(())
 }
 
+async fn handle_av_scope(
+    state: &AppState,
+    user_id: Uuid,
+    space_id: Uuid,
+    payload: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let scope_str = payload["scope"].as_str().ok_or("Missing scope")?;
+    let scope = match scope_str {
+        "space" => AvScope::Space,
+        "proximity" => AvScope::Proximity,
+        _ => return Err("Invalid scope (use proximity or space)".into()),
+    };
+
+    state
+        .set_user_av_scope(space_id, user_id, scope)
+        .await;
+
+    let msg = WsMessage {
+        msg_type: "server.av.scope_changed".to_string(),
+        payload: json!({
+            "user_id": user_id,
+            "scope": scope_str,
+        }),
+    };
+    state
+        .broadcast_to_space(space_id, &serde_json::to_string(&msg)?, None)
+        .await;
+
+    Ok(())
+}
+
 async fn handle_webrtc_signal(
     state: &AppState,
     from_user_id: Uuid,
@@ -532,23 +564,38 @@ async fn handle_webrtc_signal(
     let to_user_id_str = payload["to_user_id"].as_str().ok_or("Missing to_user_id")?;
     let to_user_id = Uuid::parse_str(to_user_id_str)?;
 
-    // Check if users are in proximity or within grace period
-    let in_proximity = state.is_in_proximity(space_id, from_user_id, to_user_id).await;
-    
-    if !in_proximity {
-        // Check grace period
-        let grace_duration = Duration::milliseconds(PROXIMITY_SIGNAL_GRACE_MS as i64);
-        let last_updated = state.get_proximity_last_updated(space_id, from_user_id).await;
-        
-        if let Some(last) = last_updated {
-            if Utc::now() - last > grace_duration {
-                tracing::warn!("Dropping signaling message: users not in proximity");
-                return Ok(());
-            }
+    let space_mesh = state
+        .both_users_space_av_scope(space_id, from_user_id, to_user_id)
+        .await;
+
+    // Meetings (space scope): allow signaling between any two space-scoped users in the office.
+    // Activity (proximity): require proximity cache match or grace period after leaving range.
+    let mut allowed = space_mesh;
+
+    if !allowed {
+        let in_proximity = state
+            .is_in_proximity(space_id, from_user_id, to_user_id)
+            .await;
+
+        if in_proximity {
+            allowed = true;
         } else {
-            tracing::warn!("Dropping signaling message: no proximity data");
-            return Ok(());
+            let grace_duration = Duration::milliseconds(PROXIMITY_SIGNAL_GRACE_MS as i64);
+            let last_updated = state
+                .get_proximity_last_updated(space_id, from_user_id)
+                .await;
+
+            if let Some(last) = last_updated {
+                if Utc::now() - last <= grace_duration {
+                    allowed = true;
+                }
+            }
         }
+    }
+
+    if !allowed {
+        tracing::warn!("Dropping signaling message: not allowed (proximity / space mesh)");
+        return Ok(());
     }
 
     // Forward the message

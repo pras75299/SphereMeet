@@ -53,15 +53,16 @@ export default function HomePage() {
     setError("");
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-      
+      const loginTimeoutMs = 25000;
+      const timeoutId = setTimeout(() => controller.abort(), loginTimeoutMs);
+
       const res = await fetch(`${API_BASE}/api/auth/guest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: displayName.trim() }),
         signal: controller.signal,
       });
-      
+
       clearTimeout(timeoutId);
       
       if (res.status === 429) throw new Error("Rate limited. Please wait a moment.");
@@ -71,7 +72,9 @@ export default function HomePage() {
       setAuth(data.token, data.user);
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        setError("Network timeout. The server is not responding.");
+        setError(
+          "Request timed out — check that the API is running and NEXT_PUBLIC_API_BASE is correct (cloud hosts may need ~30s to wake).",
+        );
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong");
       }

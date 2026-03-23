@@ -13,6 +13,13 @@ pub const HYSTERESIS_OUT_TILES: i32 = 5;
 pub const MAX_PROXIMITY_PEERS: usize = 6;
 pub const PROXIMITY_SIGNAL_GRACE_MS: u64 = 3000;
 
+/// WebRTC signaling scope: Activity uses proximity; Meetings uses full-space mesh among opted-in users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvScope {
+    Proximity,
+    Space,
+}
+
 // Bounded channel capacity
 pub const CHANNEL_CAPACITY: usize = 100;
 
@@ -127,6 +134,8 @@ pub struct SpaceState {
     pub spatial_grid: SpatialGrid,
     pub cached_map: Option<CachedMapData>,
     pub cached_zones: Vec<CachedZone>,
+    /// Per-socket A/V mode for WebRTC signaling policy (default: Proximity).
+    pub user_av_scope: HashMap<Uuid, AvScope>,
 }
 
 impl SpaceState {
@@ -138,6 +147,7 @@ impl SpaceState {
             spatial_grid: SpatialGrid::default(),
             cached_map: None,
             cached_zones: Vec::new(),
+            user_av_scope: HashMap::new(),
         }
     }
 }
@@ -228,6 +238,7 @@ impl AppState {
 
         // Add to spatial grid
         space.spatial_grid.insert(user_id, init_x, init_y);
+        space.user_av_scope.insert(user_id, AvScope::Proximity);
     }
 
     pub async fn remove_client(&self, space_id: Uuid, user_id: Uuid) {
@@ -241,6 +252,7 @@ impl AppState {
 
             space.clients.remove(&user_id);
             space.presence.remove(&user_id);
+            space.user_av_scope.remove(&user_id);
             space.proximity_cache.remove(&user_id);
 
             // Remove this user from other users' proximity caches
@@ -514,5 +526,76 @@ impl AppState {
             }
         }
         None
+    }
+
+    pub async fn set_user_av_scope(&self, space_id: Uuid, user_id: Uuid, scope: AvScope) {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let mut space = space_arc.write().await;
+            if space.clients.contains_key(&user_id) {
+                space.user_av_scope.insert(user_id, scope);
+            }
+        }
+    }
+
+    /// JSON object: user_id string -> "proximity" | "space" for everyone currently in the space.
+    pub async fn av_scopes_json_for_space(&self, space_id: Uuid) -> serde_json::Value {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
+            let mut m = serde_json::Map::new();
+            for uid in space.presence.keys() {
+                let scope = space
+                    .user_av_scope
+                    .get(uid)
+                    .copied()
+                    .unwrap_or(AvScope::Proximity);
+                let s = match scope {
+                    AvScope::Space => "space",
+                    AvScope::Proximity => "proximity",
+                };
+                m.insert(uid.to_string(), serde_json::Value::String(s.to_string()));
+            }
+            return serde_json::Value::Object(m);
+        }
+        serde_json::json!({})
+    }
+
+    /// Display name for WebSocket broadcasts (presence + move); prefers in-memory presence, then live connection.
+    pub async fn display_name_for_user(&self, space_id: Uuid, user_id: Uuid) -> String {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
+            if let Some(p) = space.presence.get(&user_id) {
+                if !p.display_name.is_empty() {
+                    return p.display_name.clone();
+                }
+            }
+            if let Some(c) = space.clients.get(&user_id) {
+                return c.display_name.clone();
+            }
+        }
+        String::new()
+    }
+
+    /// True when both users are in Space scope (Meetings mesh); signaling allowed regardless of map distance.
+    pub async fn both_users_space_av_scope(
+        &self,
+        space_id: Uuid,
+        user_a: Uuid,
+        user_b: Uuid,
+    ) -> bool {
+        if let Some(space_arc) = self.spaces.get(&space_id) {
+            let space = space_arc.read().await;
+            let sa = space
+                .user_av_scope
+                .get(&user_a)
+                .copied()
+                .unwrap_or(AvScope::Proximity);
+            let sb = space
+                .user_av_scope
+                .get(&user_b)
+                .copied()
+                .unwrap_or(AvScope::Proximity);
+            return sa == AvScope::Space && sb == AvScope::Space;
+        }
+        false
     }
 }

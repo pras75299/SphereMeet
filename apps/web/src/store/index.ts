@@ -1,5 +1,17 @@
 import { create } from 'zustand';
 
+/**
+ * One canonical string for user IDs so JWT, REST, and WebSocket JSON always match the same Map key
+ * (fixes missing self in presence → arrows do nothing, and peers showing as "Unknown").
+ */
+export function canonicalUserId(raw: string): string {
+  const s = String(raw).trim().toLowerCase();
+  if (s.length === 32 && !s.includes('-')) {
+    return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}`;
+  }
+  return s;
+}
+
 // Helper to safely access localStorage
 const getStorageItem = (key: string): string | null => {
   if (typeof window === 'undefined') return null;
@@ -73,6 +85,9 @@ export interface PeerConnection {
   remoteStream: MediaStream | null;
 }
 
+/** Activity COMMS: mesh only with proximity peers. Meetings: mesh with everyone in the office who is also in `space` scope. */
+export type AvScopeMode = 'proximity' | 'space';
+
 interface AppState {
   // Hydration
   isHydrated: boolean;
@@ -97,8 +112,21 @@ interface AppState {
   // Presence
   presence: Map<string, UserPresence>;
   setPresence: (presence: UserPresence[]) => void;
-  updatePresence: (presence: UserPresence) => void;
+  updatePresence: (
+    presence: Pick<UserPresence, 'user_id' | 'x' | 'y' | 'dir' | 'zone_id'> & {
+      display_name?: string;
+    },
+  ) => void;
   removePresence: (userId: string) => void;
+
+  /** Server-synced: who is in Meetings (space) vs Activity (proximity) A/V mode */
+  peerAvScopes: Record<string, AvScopeMode>;
+  setPeerAvScopesFromJoined: (scopes: Record<string, string>) => void;
+  patchPeerAvScope: (userId: string, scope: AvScopeMode) => void;
+
+  /** Local WebRTC peer selection mode */
+  avScope: AvScopeMode;
+  setAvScope: (scope: AvScopeMode) => void;
 
   // Proximity
   proximityPeers: string[];
@@ -140,6 +168,9 @@ export const useStore = create<AppState>((set, get) => ({
     let user: User | null = null;
     try {
       user = userStr ? JSON.parse(userStr) : null;
+      if (user?.id) {
+        user = { ...user, id: canonicalUserId(user.id) };
+      }
     } catch {
       user = null;
     }
@@ -150,14 +181,33 @@ export const useStore = create<AppState>((set, get) => ({
   token: null,
   user: null,
   setAuth: (token, user) => {
+    const normalized = { ...user, id: canonicalUserId(user.id) };
     setStorageItem('token', token);
-    setStorageItem('user', JSON.stringify(user));
-    set({ token, user });
+    setStorageItem('user', JSON.stringify(normalized));
+    set({ token, user: normalized });
   },
   clearAuth: () => {
+    const s = get();
+    try {
+      s.ws?.close(1000, 'logout');
+    } catch {
+      /* ignore */
+    }
     removeStorageItem('token');
     removeStorageItem('user');
-    set({ token: null, user: null });
+    s.localStream?.getTracks().forEach((t) => t.stop());
+    s.peerConnections.forEach((pc) => pc.pc.close());
+    set({
+      token: null,
+      user: null,
+      localStream: null,
+      nearbyAvEnabled: false,
+      avScope: 'proximity',
+      peerAvScopes: {},
+      peerConnections: new Map(),
+      ws: null,
+      wsConnected: false,
+    });
   },
 
   // Space
@@ -187,32 +237,81 @@ export const useStore = create<AppState>((set, get) => ({
   presence: new Map(),
   setPresence: (presenceList) => {
     const presenceMap = new Map<string, UserPresence>();
-    presenceList.forEach((p) => presenceMap.set(p.user_id, p));
-    set({ presence: presenceMap });
+    presenceList.forEach((p) => {
+      const id = canonicalUserId(p.user_id);
+      const dn = p.display_name?.trim();
+      presenceMap.set(id, {
+        ...p,
+        user_id: id,
+        display_name: dn && dn.length > 0 ? dn : 'Unknown',
+      });
+    });
+    set((state) => {
+      const nextScopes: Record<string, AvScopeMode> = {};
+      for (const [k, v] of Object.entries(state.peerAvScopes)) {
+        const ck = canonicalUserId(k);
+        if (presenceMap.has(ck)) nextScopes[ck] = v;
+      }
+      return { presence: presenceMap, peerAvScopes: nextScopes };
+    });
   },
   updatePresence: (presence) => {
     set((state) => {
+      const id = canonicalUserId(presence.user_id);
       const newPresence = new Map(state.presence);
-      const existing = newPresence.get(presence.user_id);
-      newPresence.set(presence.user_id, {
-        ...existing,
-        ...presence,
-        display_name: presence.display_name || existing?.display_name || 'Unknown',
-      } as UserPresence);
+      const existing = newPresence.get(id);
+      const incomingName = presence.display_name?.trim();
+      const displayName =
+        incomingName && incomingName.length > 0
+          ? incomingName
+          : (existing?.display_name ?? 'Unknown');
+      newPresence.set(id, {
+        user_id: id,
+        x: presence.x,
+        y: presence.y,
+        dir: presence.dir,
+        zone_id: presence.zone_id,
+        display_name: displayName,
+      });
       return { presence: newPresence };
     });
   },
   removePresence: (userId) => {
+    const id = canonicalUserId(userId);
     set((state) => {
       const newPresence = new Map(state.presence);
-      newPresence.delete(userId);
-      return { presence: newPresence };
+      newPresence.delete(id);
+      const nextScopes: Record<string, AvScopeMode> = {};
+      for (const [k, v] of Object.entries(state.peerAvScopes)) {
+        const ck = canonicalUserId(k);
+        if (ck !== id) nextScopes[ck] = v;
+      }
+      return { presence: newPresence, peerAvScopes: nextScopes };
     });
   },
 
+  peerAvScopes: {},
+  setPeerAvScopesFromJoined: (scopes) => {
+    const normalized: Record<string, AvScopeMode> = {};
+    for (const [k, v] of Object.entries(scopes)) {
+      normalized[canonicalUserId(k)] = v === 'space' ? 'space' : 'proximity';
+    }
+    set({ peerAvScopes: normalized });
+  },
+  patchPeerAvScope: (userId, scope) => {
+    const id = canonicalUserId(userId);
+    set((state) => ({
+      peerAvScopes: { ...state.peerAvScopes, [id]: scope },
+    }));
+  },
+
+  avScope: 'proximity',
+  setAvScope: (scope) => set({ avScope: scope }),
+
   // Proximity
   proximityPeers: [],
-  setProximityPeers: (peers) => set({ proximityPeers: peers }),
+  setProximityPeers: (peers) =>
+    set({ proximityPeers: peers.map((id) => canonicalUserId(id)) }),
 
   // Chat
   chatMessages: new Map(),

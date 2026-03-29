@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
 use futures::{sink::SinkExt, stream::StreamExt};
@@ -42,14 +43,26 @@ pub async fn ws_handler(
     let claims = match verify_token(&query.token) {
         Ok(c) => c,
         Err(_) => {
-            return Response::builder()
-                .status(401)
-                .body("Unauthorized".into())
-                .unwrap();
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "error": "Unauthorized", "code": 401 })),
+            )
+                .into_response();
         }
     };
 
     ws.on_upgrade(move |socket| handle_socket(socket, state, claims.sub, claims.display_name, query.space_id))
+}
+
+/// Serialize a `WsMessage` to JSON string; logs and returns `None` on failure (prevents task panic).
+fn serialize_msg(msg: &WsMessage) -> Option<String> {
+    match serde_json::to_string(msg) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to serialize WsMessage type={}: {:?}", msg.msg_type, e);
+            None
+        }
+    }
 }
 
 async fn handle_socket(
@@ -96,9 +109,11 @@ async fn handle_socket(
                 "display_name": display_name
             }),
         };
-        state.broadcast_to_space(space_id, &serde_json::to_string(&msg).unwrap(), Some(user_id)).await;
+        if let Some(text) = serialize_msg(&msg) {
+            state.broadcast_to_space(space_id, &text, Some(user_id)).await;
+        }
     }
-    // Broadcast full presence snapshot to everyone so all clients stay in sync (fixes avatars disappearing after rejoin)
+    // Broadcast full presence snapshot to everyone so all clients stay in sync
     let snapshot_msg = WsMessage {
         msg_type: "server.presence.snapshot".to_string(),
         payload: json!({
@@ -112,7 +127,9 @@ async fn handle_socket(
             })).collect::<Vec<_>>()
         }),
     };
-    state.broadcast_to_space(space_id, &serde_json::to_string(&snapshot_msg).unwrap(), None).await;
+    if let Some(text) = serialize_msg(&snapshot_msg) {
+        state.broadcast_to_space(space_id, &text, None).await;
+    }
 
     // Compute initial proximity
     let proximity_changes = state.compute_proximity(space_id).await;
@@ -124,7 +141,9 @@ async fn handle_socket(
                     "peers": peers.into_iter().collect::<Vec<_>>()
                 }),
             };
-            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+            if let Some(text) = serialize_msg(&msg) {
+                let _ = sender.try_send(text);
+            }
         }
     }
 
@@ -174,7 +193,9 @@ async fn handle_socket(
                                     "peers": peers.into_iter().collect::<Vec<_>>()
                                 }),
                             };
-                            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+                            if let Some(text) = serialize_msg(&msg) {
+                                let _ = sender.try_send(text);
+                            }
                         }
                     }
                 }
@@ -224,7 +245,9 @@ async fn handle_socket(
         msg_type: "server.presence.leave".to_string(),
         payload: json!({ "user_id": user_id }),
     };
-    state.broadcast_to_space(space_id, &serde_json::to_string(&leave_msg).unwrap(), Some(user_id)).await;
+    if let Some(text) = serialize_msg(&leave_msg) {
+        state.broadcast_to_space(space_id, &text, Some(user_id)).await;
+    }
 
     state.remove_client(space_id, user_id).await;
     tracing::info!("User {} left space {}", user_id, space_id);
@@ -239,7 +262,9 @@ async fn handle_socket(
                     "peers": peers.into_iter().collect::<Vec<_>>()
                 }),
             };
-            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+            if let Some(text) = serialize_msg(&msg) {
+                let _ = sender.try_send(text);
+            }
         }
     }
 }
@@ -490,8 +515,8 @@ async fn handle_chat_send(
         return Err("Empty message".into());
     }
 
-    // Enforce maximum message length (1000 chars)
-    if body.len() > 1000 {
+    // Enforce maximum message length (1000 Unicode scalar values, not bytes)
+    if body.chars().count() > 1000 {
         return Err("Message too long (max 1000 characters)".into());
     }
 

@@ -11,24 +11,35 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 
-/// JWT secret - required in production, uses default only in development
+/// JWT secret — required whenever any production-like env var is set.
+/// Checks RUST_ENV, ENVIRONMENT, and APP_ENV for "production" / "prod" / "staging".
 static JWT_SECRET: Lazy<String> = Lazy::new(|| {
-    let is_production = std::env::var("RUST_ENV")
-        .map(|v| v == "production")
-        .unwrap_or(false);
-    
+    let env_value = std::env::var("RUST_ENV")
+        .or_else(|_| std::env::var("ENVIRONMENT"))
+        .or_else(|_| std::env::var("APP_ENV"))
+        .unwrap_or_default();
+    let env_lower = env_value.to_lowercase();
+    let is_production = matches!(env_lower.as_str(), "production" | "prod" | "staging");
+
     match std::env::var("JWT_SECRET") {
         Ok(secret) => {
             if secret.len() < 32 {
-                panic!("JWT_SECRET must be at least 32 characters long");
+                panic!("JWT_SECRET must be at least 32 characters long (got {} chars)", secret.len());
             }
             secret
         }
         Err(_) => {
             if is_production {
-                panic!("JWT_SECRET must be set in production environment");
+                panic!(
+                    "JWT_SECRET must be set in production (detected env='{}'). \
+                     Set a random 32+ char secret.",
+                    env_value
+                );
             }
-            tracing::warn!("Using default JWT_SECRET - DO NOT use in production!");
+            tracing::warn!(
+                "JWT_SECRET not set — using insecure dev default. \
+                 Set JWT_SECRET before deploying."
+            );
             "dev_secret_change_me_at_least_32_chars".to_string()
         }
     }

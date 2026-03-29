@@ -327,13 +327,21 @@ impl AppState {
     pub async fn broadcast_to_space(&self, space_id: Uuid, message: &str, exclude_user: Option<Uuid>) {
         if let Some(space_arc) = self.spaces.get(&space_id) {
             let space = space_arc.read().await;
+            let mut dropped = 0u32;
             for (uid, client) in &space.clients {
                 if exclude_user != Some(*uid) {
-                    // Use try_send to avoid blocking on slow clients
                     if let Err(e) = client.sender.try_send(message.to_string()) {
-                        tracing::warn!("Failed to send message to client {}: {:?}", uid, e);
+                        dropped += 1;
+                        tracing::warn!(
+                            user_id = %uid,
+                            space_id = %space_id,
+                            "Broadcast message dropped (channel full or closed): {:?}", e
+                        );
                     }
                 }
+            }
+            if dropped > 0 {
+                tracing::warn!(dropped, space_id = %space_id, "Dropped {} broadcast message(s) this tick", dropped);
             }
         }
     }
@@ -389,11 +397,11 @@ impl AppState {
                 }
             }
 
-            // Sort by distance, then by user_id for tie-breaking
+            // Sort by distance, then by UUID bytes for deterministic tie-breaking (no String alloc)
             distances.sort_by(|a, b| {
                 a.1.partial_cmp(&b.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+                    .then_with(|| a.0.cmp(&b.0))
             });
 
             // Cap at MAX_PROXIMITY_PEERS

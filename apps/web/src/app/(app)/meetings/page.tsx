@@ -46,15 +46,17 @@ function MeetingsContent() {
   ]);
 
   useEffect(() => {
+    // Capture store actions once at mount so cleanup never reads stale closures
+    const { setLocalStream, setNearbyAvEnabled, setAvScope, clearPeerConnections } = useStore.getState();
     return () => {
       if (!inMeetingRef.current) return;
-      const s = useStore.getState();
-      s.ws?.send(JSON.stringify({ type: 'client.av.scope', payload: { scope: 'proximity' } }));
-      s.localStream?.getTracks().forEach((track) => track.stop());
-      s.setLocalStream(null);
-      s.setNearbyAvEnabled(false);
-      s.setAvScope('proximity');
-      s.clearPeerConnections();
+      const { ws, localStream } = useStore.getState();
+      ws?.send(JSON.stringify({ type: 'client.av.scope', payload: { scope: 'proximity' } }));
+      localStream?.getTracks().forEach((track) => track.stop());
+      setLocalStream(null);
+      setNearbyAvEnabled(false);
+      setAvScope('proximity');
+      clearPeerConnections();
     };
   }, []);
 

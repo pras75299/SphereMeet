@@ -120,6 +120,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   /** Offers received while A/V was disabled; process when user enables A/V */
   const pendingOffersRef = useRef<Map<string, { sdp: string }>>(new Map());
+  /** Peer IDs for which createPeerConnection has been called but not yet settled — prevents duplicate PCs */
+  const inFlightPeersRef = useRef<Set<string>>(new Set());
 
   // Get stable references to store functions
   const token = useStore((state) => state.token);
@@ -186,12 +188,24 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       peerId = canonicalUserId(peerId);
       const currentUser = userRef.current;
       const currentLocalStream = localStreamRef.current;
-      
+
+      // Guard: already in-flight or already connected — prevents duplicate PCs from rapid proximity events
+      if (inFlightPeersRef.current.has(peerId)) {
+        console.log('[WebRTC] Skipping duplicate createPeerConnection for', peerId, '(already in-flight)');
+        return null;
+      }
+      if (useStore.getState().peerConnections.has(peerId)) {
+        console.log('[WebRTC] Skipping createPeerConnection for', peerId, '(already exists)');
+        return null;
+      }
+      inFlightPeersRef.current.add(peerId);
+
       if (!currentUser || !currentLocalStream) {
         console.log('[WebRTC] Cannot create peer connection - missing user or stream', {
           hasUser: !!currentUser,
           hasStream: !!currentLocalStream
         });
+        inFlightPeersRef.current.delete(peerId);
         return null;
       }
 
@@ -278,34 +292,37 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       };
 
       setPeerConnection(peerId, pc, null);
+      // Connection is now tracked in the store — safe to remove from in-flight set
+      inFlightPeersRef.current.delete(peerId);
 
-      // If initiator, create offer
+      // If initiator, create offer; capture sdp before the async gap to avoid stale closure
       if (isInitiator) {
         console.log('[WebRTC] Creating offer for', peerId);
         pc.createOffer()
           .then((offer) => {
             console.log('[WebRTC] Offer created for', peerId);
-            return pc.setLocalDescription(offer);
+            return pc.setLocalDescription(offer).then(() => offer);
           })
-          .then(() => {
+          .then((offer) => {
             console.log('[WebRTC] Local description set for', peerId);
             const ws = getWs();
-            if (pc.localDescription && ws?.readyState === WebSocket.OPEN) {
+            // Use the offer SDP we captured — avoids reading pc.localDescription after async gap
+            if (offer.sdp && ws?.readyState === WebSocket.OPEN) {
               console.log('[WebRTC] Sending offer to', peerId);
               ws.send(
                 JSON.stringify({
                   type: 'client.webrtc.offer',
-                  payload: {
-                    to_user_id: peerId,
-                    sdp: pc.localDescription.sdp,
-                  },
+                  payload: { to_user_id: peerId, sdp: offer.sdp },
                 })
               );
             } else {
               console.log('[WebRTC] Cannot send offer - WebSocket not ready');
             }
           })
-          .catch((err) => console.error('[WebRTC] Error creating offer:', err));
+          .catch((err) => {
+            console.error('[WebRTC] Error creating offer:', err);
+            inFlightPeersRef.current.delete(peerId);
+          });
       }
 
       return pc;
@@ -336,14 +353,15 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       return pc
         .setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
         .then(() => pc.createAnswer())
-        .then((answer) => pc.setLocalDescription(answer))
-        .then(() => {
+        .then((answer) => pc.setLocalDescription(answer).then(() => answer))
+        .then((answer) => {
+          // Use captured answer SDP — avoids stale pc.localDescription read after async gap
           const ws = getWs();
           if (ws?.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
                 type: 'client.webrtc.answer',
-                payload: { to_user_id: fromId, sdp: pc.localDescription?.sdp },
+                payload: { to_user_id: fromId, sdp: answer.sdp },
               })
             );
           }
@@ -619,16 +637,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     });
 
     desiredPeers.forEach((peerId) => {
-      if (!useStore.getState().peerConnections.has(peerId)) {
-        const isInitiator = currentUser.id < peerId;
-        createPeerConnection(peerId, isInitiator);
-      }
+      // createPeerConnection itself guards against duplicates via inFlightPeersRef + store check
+      const isInitiator = currentUser.id < peerId;
+      createPeerConnection(peerId, isInitiator);
     });
 
     Array.from(useStore.getState().peerConnections.keys()).forEach((peerId) => {
       if (!desiredPeers.has(peerId)) {
         pendingIceRef.current.delete(peerId);
         pendingOffersRef.current.delete(peerId);
+        inFlightPeersRef.current.delete(peerId);
         removePeerConnection(peerId);
       }
     });
@@ -692,6 +710,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       // Clean up peer connections on disconnect
       pendingIceRef.current.clear();
       pendingOffersRef.current.clear();
+      inFlightPeersRef.current.clear();
       clearPeerConnections();
 
       // Abnormal close (e.g. 1006): schedule reconnect by bumping tick so this effect re-runs
@@ -732,6 +751,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       isConnectingRef.current = false;
       pendingIceRef.current.clear();
       pendingOffersRef.current.clear();
+      inFlightPeersRef.current.clear();
       clearPeerConnections();
     };
   }, [token, spaceId, wsReconnectTick, setWs, setWsConnected, clearPeerConnections]);

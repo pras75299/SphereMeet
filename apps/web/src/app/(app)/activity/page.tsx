@@ -119,22 +119,41 @@ function getSpriteGrid(dir: string, color: string): (string | null)[][] {
 // ─── PeerVideo ────────────────────────────────────────────────────────────────
 function PeerVideo({ stream }: { stream: MediaStream | null }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [blocked, setBlocked] = useState(false);
+
   useEffect(() => {
     const el = videoRef.current;
     if (!el || !stream) return;
     el.srcObject = stream;
-    el.play().catch(() => {});
+    setBlocked(false);
+    el.play().catch((err) => {
+      // Autoplay blocked by browser policy — show click-to-play prompt
+      console.warn('[PeerVideo] Autoplay blocked:', err);
+      setBlocked(true);
+    });
   }, [stream]);
+
   if (!stream) return null;
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted={false}
-      className="w-full aspect-video bg-black object-cover"
-      style={{ borderRadius: 0 }}
-    />
+    <div className="relative w-full aspect-video bg-black">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={false}
+        className="w-full h-full object-cover"
+        style={{ borderRadius: 0 }}
+      />
+      {blocked && (
+        <button
+          className="absolute inset-0 flex items-center justify-center pixel-mono text-[10px] uppercase tracking-widest"
+          style={{ background: "rgba(0,0,0,0.7)", color: "var(--secondary)" }}
+          onClick={() => { videoRef.current?.play().then(() => setBlocked(false)).catch(() => {}); }}
+        >
+          ▶ CLICK TO UNMUTE
+        </button>
+      )}
+    </div>
   );
 }
 

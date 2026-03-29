@@ -93,15 +93,22 @@ async fn main() {
         .acquire_timeout(Duration::from_secs(30))
         .connect(&database_url)
         .await
-        .expect("Failed to connect to database");
+        .unwrap_or_else(|e| {
+            eprintln!("FATAL: Cannot connect to database at configured DATABASE_URL: {}", e);
+            eprintln!("Check that the database is running and DATABASE_URL is correct.");
+            std::process::exit(1);
+        });
 
     tracing::info!("Running migrations...");
-    db::run_migrations(&pool).await.expect("Failed to run migrations");
+    db::run_migrations(&pool).await.unwrap_or_else(|e| {
+        eprintln!("FATAL: Database migration failed: {}", e);
+        std::process::exit(1);
+    });
 
-    let main_office_id = db::ensure_main_office(&pool)
-        .await
-        .expect("Failed to ensure Main Office demo space");
-    tracing::info!(space_id = %main_office_id, "Main Office ready");
+    match db::ensure_main_office(&pool).await {
+        Ok(id) => tracing::info!(space_id = %id, "Main Office ready"),
+        Err(e) => tracing::warn!("Could not ensure Main Office (non-fatal, spaces still listable): {:?}", e),
+    }
 
     let state = Arc::new(AppState::new(pool));
 

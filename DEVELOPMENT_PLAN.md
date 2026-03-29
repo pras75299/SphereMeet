@@ -11,7 +11,7 @@ A production-quality MVP inspired by **Gather + Slack + Zoom** with true proximi
 
 ### Doc freshness (code-aligned)
 
-This plan is maintained to match [`apps/server/`](apps/server/) and [`apps/web/`](apps/web/). Notable implementation facts: **space join is implicit on WebSocket open** (query params), not a `client.join` message; Activity uses a **DOM tile grid** at **64px** per map cell (see `TILE_SIZE` in `activity/page.tsx`); chat has **no virtualized list** yet; **Main Office** is ensured on **every server start** via `db::ensure_main_office` plus optional `POST /api/dev/seed`.
+This plan is maintained to match [`apps/server/`](apps/server/) and [`apps/web/`](apps/web/). Notable implementation facts: **space join is implicit on WebSocket open** (query params), not a `client.join` message; Activity uses a **DOM tile grid** at **64px** per map cell (see `TILE_SIZE` in `activity/page.tsx`); chat has **no virtualized list** yet; **Main Office** is ensured on **every server start** via `db::ensure_main_office` plus optional `POST /api/dev/seed`; **Meetings** uses **`client.av.scope` `space`** and server **`AvScope`** so full-space video is not limited by proximity (see [`APPLICATION_TRACKER.md`](APPLICATION_TRACKER.md)).
 
 ---
 
@@ -216,7 +216,7 @@ CREATE INDEX idx_zones_space ON zones(space_id);
 
 ### Phase 10: Meetings Mode ✅
 - [x] Video grid layout (responsive 2×3-style grid)
-- [x] Local `getUserMedia` + tiles for self and up to five others from **same** `peerConnections` / presence store (full-space, not proximity-filtered)
+- [x] Local `getUserMedia` into shared store `localStream` + **`client.av.scope` `space`** so WebRTC meshes with all other `space`-scoped users in the office (server relays signaling when **both** peers are `space`; capped client-side, e.g. 15 peers)
 - [x] Mute / camera / leave controls (client-side)
 
 ---
@@ -265,6 +265,7 @@ On upgrade, [`apps/server/src/ws.rs`](apps/server/src/ws.rs) loads the space int
 |------|---------|-------------|
 | `client.move` | `{ x, y, dir }` | Move avatar |
 | `client.chat.send` | `{ channel, body }` | Send chat message |
+| `client.av.scope` | `{ scope: "proximity" \| "space" }` | Activity → `proximity` (nearby mesh); Meetings → `space` (full-office mesh with others in `space`) |
 | `client.webrtc.offer` | `{ to_user_id, sdp }` | WebRTC offer |
 | `client.webrtc.answer` | `{ to_user_id, sdp }` | WebRTC answer |
 | `client.webrtc.ice` | `{ to_user_id, candidate }` | ICE candidate |
@@ -273,11 +274,12 @@ On upgrade, [`apps/server/src/ws.rs`](apps/server/src/ws.rs) loads the space int
 
 | Type | Payload | Description |
 |------|---------|-------------|
-| `server.joined` | `{ self, space, map, zones, presence }` | Initial state after connect |
+| `server.joined` | `{ self, space, map, zones, presence, av_scopes }` | Initial state after connect; `av_scopes` maps `user_id` → `"proximity"` \| `"space"` |
 | `server.presence.update` | `{ user_id, x, y, dir, zone_id, display_name? }` | User moved / joined broadcast |
 | `server.presence.snapshot` | `{ presence: [...] }` | Full roster sync (e.g. after join) |
 | `server.presence.leave` | `{ user_id }` | User left |
 | `server.proximity` | `{ peers: UUID[] }` | Proximity list update |
+| `server.av.scope_changed` | `{ user_id, scope }` | A user switched Meetings vs Activity A/V mode |
 | `server.move.rejected` | `{ reason }` | Move blocked (wall / bounds) |
 | `server.chat.new` | `{ id, channel, user_id, display_name, body, created_at }` | New message |
 | `server.webrtc.offer` | `{ from_user_id, sdp }` | Forwarded offer |

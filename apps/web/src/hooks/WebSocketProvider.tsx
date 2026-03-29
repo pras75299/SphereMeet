@@ -1,10 +1,22 @@
 'use client';
 
-import { createContext, useContext, useCallback, useEffect, useRef, ReactNode, useMemo } from 'react';
-import { useStore } from '@/store';
+import { createContext, useContext, useCallback, useEffect, useRef, useState, ReactNode } from 'react';
+import { useStore, canonicalUserId } from '@/store';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
-const WS_BASE = API_BASE.replace('http', 'ws');
+
+/** Build ws/wss origin from http(s) API base (replace('http','ws') breaks https:// → must use URL). */
+function apiBaseToWsOrigin(apiBase: string): string {
+  try {
+    const u = new URL(apiBase);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    return u.origin;
+  } catch {
+    return apiBase.replace(/^http/, 'ws');
+  }
+}
+
+const WS_BASE = apiBaseToWsOrigin(API_BASE);
 
 interface WsMessage {
   type: string;
@@ -37,7 +49,12 @@ interface JoinedPayload {
     dir: string;
     zone_id: string | null;
   }>;
+  /** user_id -> "proximity" | "space" */
+  av_scopes?: Record<string, string>;
 }
+
+/** Max concurrent mesh peers in Meetings (full-space) mode — mesh cost is O(n²). */
+const MAX_SPACE_MESH_PEERS = 15;
 
 interface PresenceUpdatePayload {
   user_id: string;
@@ -97,10 +114,14 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectingRef = useRef(false);
+  /** Bumps when we need to retry after an abnormal close (effect deps). */
+  const [wsReconnectTick, setWsReconnectTick] = useState(0);
   /** Queue ICE candidates until remote description is set (required for connection in many browsers) */
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   /** Offers received while A/V was disabled; process when user enables A/V */
   const pendingOffersRef = useRef<Map<string, { sdp: string }>>(new Map());
+  /** Peer IDs for which createPeerConnection has been called but not yet settled — prevents duplicate PCs */
+  const inFlightPeersRef = useRef<Set<string>>(new Set());
 
   // Get stable references to store functions
   const token = useStore((state) => state.token);
@@ -112,6 +133,11 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const removePresence = useStore((state) => state.removePresence);
   const setProximityPeers = useStore((state) => state.setProximityPeers);
   const proximityPeers = useStore((state) => state.proximityPeers);
+  const avScope = useStore((state) => state.avScope);
+  const peerAvScopes = useStore((state) => state.peerAvScopes);
+  const presence = useStore((state) => state.presence);
+  const setPeerAvScopesFromJoined = useStore((state) => state.setPeerAvScopesFromJoined);
+  const patchPeerAvScope = useStore((state) => state.patchPeerAvScope);
   const addChatMessage = useStore((state) => state.addChatMessage);
   const setWs = useStore((state) => state.setWs);
   const setWsConnected = useStore((state) => state.setWsConnected);
@@ -143,29 +169,43 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const getWs = useCallback(() => wsRef.current ?? useStore.getState().ws ?? null, []);
 
   const drainIceQueue = useCallback((peerId: string) => {
-    const queue = pendingIceRef.current.get(peerId);
+    const id = canonicalUserId(peerId);
+    const queue = pendingIceRef.current.get(id);
     if (!queue?.length) return;
-    const peerConn = useStore.getState().peerConnections.get(peerId);
+    const peerConn = useStore.getState().peerConnections.get(id);
     if (!peerConn?.pc?.remoteDescription) return;
     const pc = peerConn.pc;
-    pendingIceRef.current.delete(peerId);
+    pendingIceRef.current.delete(id);
     queue.forEach((candidate) => {
       pc.addIceCandidate(new RTCIceCandidate(candidate))
-        .then(() => console.log('[WebRTC] Added queued ICE candidate for', peerId))
+        .then(() => console.log('[WebRTC] Added queued ICE candidate for', id))
         .catch((err) => console.error('[WebRTC] Error adding queued ICE candidate:', err));
     });
   }, []);
 
   const createPeerConnection = useCallback(
     (peerId: string, isInitiator: boolean): RTCPeerConnection | null => {
+      peerId = canonicalUserId(peerId);
       const currentUser = userRef.current;
       const currentLocalStream = localStreamRef.current;
-      
+
+      // Guard: already in-flight or already connected — prevents duplicate PCs from rapid proximity events
+      if (inFlightPeersRef.current.has(peerId)) {
+        console.log('[WebRTC] Skipping duplicate createPeerConnection for', peerId, '(already in-flight)');
+        return null;
+      }
+      if (useStore.getState().peerConnections.has(peerId)) {
+        console.log('[WebRTC] Skipping createPeerConnection for', peerId, '(already exists)');
+        return null;
+      }
+      inFlightPeersRef.current.add(peerId);
+
       if (!currentUser || !currentLocalStream) {
         console.log('[WebRTC] Cannot create peer connection - missing user or stream', {
           hasUser: !!currentUser,
           hasStream: !!currentLocalStream
         });
+        inFlightPeersRef.current.delete(peerId);
         return null;
       }
 
@@ -252,39 +292,83 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       };
 
       setPeerConnection(peerId, pc, null);
+      // Connection is now tracked in the store — safe to remove from in-flight set
+      inFlightPeersRef.current.delete(peerId);
 
-      // If initiator, create offer
+      // If initiator, create offer; capture sdp before the async gap to avoid stale closure
       if (isInitiator) {
         console.log('[WebRTC] Creating offer for', peerId);
         pc.createOffer()
           .then((offer) => {
             console.log('[WebRTC] Offer created for', peerId);
-            return pc.setLocalDescription(offer);
+            return pc.setLocalDescription(offer).then(() => offer);
           })
-          .then(() => {
+          .then((offer) => {
             console.log('[WebRTC] Local description set for', peerId);
             const ws = getWs();
-            if (pc.localDescription && ws?.readyState === WebSocket.OPEN) {
+            // Use the offer SDP we captured — avoids reading pc.localDescription after async gap
+            if (offer.sdp && ws?.readyState === WebSocket.OPEN) {
               console.log('[WebRTC] Sending offer to', peerId);
               ws.send(
                 JSON.stringify({
                   type: 'client.webrtc.offer',
-                  payload: {
-                    to_user_id: peerId,
-                    sdp: pc.localDescription.sdp,
-                  },
+                  payload: { to_user_id: peerId, sdp: offer.sdp },
                 })
               );
             } else {
               console.log('[WebRTC] Cannot send offer - WebSocket not ready');
             }
           })
-          .catch((err) => console.error('[WebRTC] Error creating offer:', err));
+          .catch((err) => {
+            console.error('[WebRTC] Error creating offer:', err);
+            inFlightPeersRef.current.delete(peerId);
+          });
       }
 
       return pc;
     },
     [setPeerConnection, updatePeerStream, getWs]
+  );
+
+  /** Apply remote SDP offer: create PC if needed, answer, send — shared by WS handler and pending-offer drain. */
+  const applyRemoteOffer = useCallback(
+    (rawPeerId: string, sdp: string) => {
+      const fromId = canonicalUserId(rawPeerId);
+      const peerConnections = useStore.getState().peerConnections;
+      const existing = peerConnections.get(fromId);
+      if (existing?.pc?.remoteDescription) {
+        console.log('[WebRTC] Skip offer; remote description already set for', fromId);
+        return Promise.resolve();
+      }
+
+      let pc: RTCPeerConnection;
+      if (!existing) {
+        const newPc = createPeerConnection(fromId, false);
+        if (!newPc) return Promise.reject(new Error('Cannot create peer connection'));
+        pc = newPc;
+      } else {
+        pc = existing.pc;
+      }
+
+      return pc
+        .setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
+        .then(() => pc.createAnswer())
+        .then((answer) => pc.setLocalDescription(answer).then(() => answer))
+        .then((answer) => {
+          // Use captured answer SDP — avoids stale pc.localDescription read after async gap
+          const ws = getWs();
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: 'client.webrtc.answer',
+                payload: { to_user_id: fromId, sdp: answer.sdp },
+              })
+            );
+          }
+          drainIceQueue(fromId);
+        });
+    },
+    [createPeerConnection, getWs, drainIceQueue]
   );
 
   const handleMessage = useCallback(
@@ -308,33 +392,50 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
                 : null,
               payload.zones
             );
-            setPresence(
-              payload.presence.map((p) => ({
-                user_id: p.user_id,
-                display_name: p.display_name,
-                x: p.x,
-                y: p.y,
-                dir: p.dir as 'up' | 'down' | 'left' | 'right',
-                zone_id: p.zone_id,
-              }))
-            );
+            const selfId = canonicalUserId(payload.self.user_id);
+            const presenceRows = payload.presence.map((p) => ({
+              user_id: p.user_id,
+              display_name: p.display_name,
+              x: p.x,
+              y: p.y,
+              dir: p.dir as 'up' | 'down' | 'left' | 'right',
+              zone_id: p.zone_id,
+            }));
+            if (!presenceRows.some((p) => canonicalUserId(p.user_id) === selfId)) {
+              presenceRows.push({
+                user_id: selfId,
+                display_name: payload.self.display_name,
+                x: 5,
+                y: 5,
+                dir: 'down',
+                zone_id: null,
+              });
+            }
+            setPresence(presenceRows);
+            if (payload.av_scopes && typeof payload.av_scopes === 'object') {
+              setPeerAvScopesFromJoined(payload.av_scopes);
+            }
             break;
           }
           case 'server.presence.update': {
             const payload = message.payload as PresenceUpdatePayload;
+            const dn =
+              typeof payload.display_name === 'string' && payload.display_name.trim().length > 0
+                ? payload.display_name.trim()
+                : undefined;
             updatePresence({
-              user_id: payload.user_id,
-              display_name: payload.display_name || '',
+              user_id: canonicalUserId(payload.user_id),
               x: payload.x,
               y: payload.y,
               dir: payload.dir as 'up' | 'down' | 'left' | 'right',
               zone_id: payload.zone_id,
+              ...(dn !== undefined ? { display_name: dn } : {}),
             });
             break;
           }
           case 'server.presence.leave': {
             const payload = message.payload as PresenceLeavePayload;
-            removePresence(payload.user_id);
+            removePresence(canonicalUserId(payload.user_id));
             break;
           }
           case 'server.presence.snapshot': {
@@ -353,47 +454,23 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             }
             break;
           }
+          case 'server.move.rejected': {
+            const payload = message.payload as { reason?: string };
+            console.warn('[Move] Rejected by server:', payload.reason ?? 'unknown');
+            break;
+          }
           case 'server.proximity': {
             const payload = message.payload as ProximityPayload;
-            const currentUser = userRef.current;
-            const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
-            const currentLocalStream = localStreamRef.current;
-
-            console.log('[Proximity] Update received:', {
-              peers: payload.peers,
-              avEnabled: currentNearbyAvEnabled,
-              hasStream: !!currentLocalStream
-            });
-
-            // Always update proximity peers list
             setProximityPeers(payload.peers);
-
-            // Only manage WebRTC connections if A/V is enabled
-            if (currentUser && currentNearbyAvEnabled && currentLocalStream) {
-              const desiredPeers = new Set(payload.peers);
-              const currentPeers = new Set(useStore.getState().peerConnections.keys());
-
-              console.log('[Proximity] Managing WebRTC connections:', {
-                desiredPeers: Array.from(desiredPeers),
-                currentPeers: Array.from(currentPeers)
-              });
-
-              // Connect to new peers
-              desiredPeers.forEach((peerId) => {
-                if (!currentPeers.has(peerId)) {
-                  const isInitiator = currentUser.id < peerId;
-                  createPeerConnection(peerId, isInitiator);
-                }
-              });
-
-              // Disconnect from peers no longer in range
-              currentPeers.forEach((peerId) => {
-                if (!desiredPeers.has(peerId)) {
-                  pendingIceRef.current.delete(peerId);
-                  pendingOffersRef.current.delete(peerId);
-                  removePeerConnection(peerId);
-                }
-              });
+            break;
+          }
+          case 'server.av.scope_changed': {
+            const payload = message.payload as { user_id?: string; scope?: string };
+            if (
+              payload.user_id &&
+              (payload.scope === 'space' || payload.scope === 'proximity')
+            ) {
+              patchPeerAvScope(canonicalUserId(payload.user_id), payload.scope);
             }
             break;
           }
@@ -414,8 +491,9 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             const currentUser = userRef.current;
             const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
             const currentLocalStream = localStreamRef.current;
+            const fromId = canonicalUserId(payload.from_user_id);
 
-            console.log('[WebRTC] Received offer from', payload.from_user_id, {
+            console.log('[WebRTC] Received offer from', fromId, {
               avEnabled: currentNearbyAvEnabled,
               hasStream: !!currentLocalStream
             });
@@ -424,86 +502,60 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
             if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) {
               console.log('[WebRTC] Storing offer – will process when A/V is enabled');
-              pendingOffersRef.current.set(payload.from_user_id, { sdp: payload.sdp });
+              pendingOffersRef.current.set(fromId, { sdp: payload.sdp });
               return;
             }
 
-            const peerConnections = useStore.getState().peerConnections;
-            let peerConn = peerConnections.get(payload.from_user_id);
-            let pc: RTCPeerConnection;
-
-            if (!peerConn) {
-              const newPc = createPeerConnection(payload.from_user_id, false);
-              if (!newPc) return;
-              pc = newPc;
-            } else {
-              pc = peerConn.pc;
-            }
-
-            pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }))
-              .then(() => pc.createAnswer())
-              .then((answer) => pc.setLocalDescription(answer))
-              .then(() => {
-                const ws = getWs();
-                if (ws?.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: 'client.webrtc.answer',
-                      payload: {
-                        to_user_id: payload.from_user_id,
-                        sdp: pc.localDescription?.sdp,
-                      },
-                    })
-                  );
-                }
-                drainIceQueue(payload.from_user_id);
-              })
-              .catch((err) => console.error('Error handling offer:', err));
+            applyRemoteOffer(fromId, payload.sdp).catch((err) =>
+              console.error('Error handling offer:', err)
+            );
             break;
           }
           case 'server.webrtc.answer': {
             const payload = message.payload as WebRTCSignalPayload;
-            console.log('[WebRTC] Received answer from', payload.from_user_id);
+            const fromId = canonicalUserId(payload.from_user_id);
+            console.log('[WebRTC] Received answer from', fromId);
             if (!payload.sdp) return;
 
             const peerConnections = useStore.getState().peerConnections;
-            const peerConn = peerConnections.get(payload.from_user_id);
+            const peerConn = peerConnections.get(fromId);
             if (!peerConn) {
-              console.log('[WebRTC] No peer connection found for answer from', payload.from_user_id);
+              console.log('[WebRTC] No peer connection found for answer from', fromId);
               return;
             }
 
             peerConn.pc
               .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
               .then(() => {
-                console.log('[WebRTC] Set remote description (answer) for', payload.from_user_id);
-                drainIceQueue(payload.from_user_id);
+                console.log('[WebRTC] Set remote description (answer) for', fromId);
+                drainIceQueue(fromId);
               })
               .catch((err) => console.error('Error handling answer:', err));
             break;
           }
           case 'server.webrtc.ice': {
             const payload = message.payload as WebRTCSignalPayload;
-            console.log('[WebRTC] Received ICE candidate from', payload.from_user_id);
+            const fromId = canonicalUserId(payload.from_user_id);
+            console.log('[WebRTC] Received ICE candidate from', fromId);
             if (!payload.candidate) return;
 
             const peerConnections = useStore.getState().peerConnections;
-            const peerConn = peerConnections.get(payload.from_user_id);
+            const peerConn = peerConnections.get(fromId);
             if (!peerConn) {
-              console.log('[WebRTC] No peer connection found for ICE from', payload.from_user_id);
+              console.log('[WebRTC] No peer connection found for ICE from', fromId);
               return;
             }
 
             const pc = peerConn.pc;
             if (!pc.remoteDescription) {
-              const queue = pendingIceRef.current.get(payload.from_user_id) ?? [];
+              const queue = pendingIceRef.current.get(fromId) ?? [];
               queue.push(payload.candidate);
-              pendingIceRef.current.set(payload.from_user_id, queue);
-              console.log('[WebRTC] Queued ICE candidate for', payload.from_user_id, '(no remote description yet)');
+              pendingIceRef.current.set(fromId, queue);
+              console.log('[WebRTC] Queued ICE candidate for', fromId, '(no remote description yet)');
               return;
             }
             pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
-              .then(() => console.log('[WebRTC] Added ICE candidate for', payload.from_user_id))
+              .then(() => console.log('[WebRTC] Added ICE candidate for', fromId))
               .catch((err) => console.error('Error adding ICE candidate:', err));
             break;
           }
@@ -516,90 +568,114 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       setSpace,
       setMap,
       setPresence,
+      setPeerAvScopesFromJoined,
       updatePresence,
       removePresence,
       setProximityPeers,
+      patchPeerAvScope,
       addChatMessage,
-      createPeerConnection,
+      applyRemoteOffer,
       removePeerConnection,
       getWs,
       drainIceQueue,
     ]
   );
 
-  // When user enables A/V: create peer connections for proximity peers and process any offers we received while A/V was off
+  const handleMessageRef = useRef(handleMessage);
+  handleMessageRef.current = handleMessage;
+
+  /**
+   * Single place for WebRTC peer set: Activity uses server `proximityPeers`;
+   * Meetings uses everyone in `peerAvScopes` with `space` (capped).
+   */
   useEffect(() => {
     const state = useStore.getState();
-    const { user: currentUser, nearbyAvEnabled: enabled, localStream: stream, peerConnections: conns } = state;
+    const {
+      user: currentUser,
+      nearbyAvEnabled: enabled,
+      localStream: stream,
+      peerConnections: conns,
+      avScope: mode,
+      peerAvScopes: scopes,
+      proximityPeers: proxPeers,
+      presence: pres,
+    } = state;
     if (!currentUser || !enabled || !stream) return;
 
-    const currentPeers = new Set(conns.keys());
-    const desiredPeers = new Set(proximityPeers);
+    let desiredList: string[];
+    if (mode === 'space') {
+      desiredList = Array.from(pres.keys())
+        .filter((id) => id !== currentUser.id && scopes[id] === 'space')
+        .sort()
+        .slice(0, MAX_SPACE_MESH_PEERS);
+    } else {
+      desiredList = [...proxPeers];
+    }
 
-    desiredPeers.forEach((peerId) => {
-      if (!currentPeers.has(peerId)) {
-        const isInitiator = currentUser.id < peerId;
-        console.log('[Proximity] A/V just enabled – creating peer connection to', peerId);
-        createPeerConnection(peerId, isInitiator);
-      }
+    const desiredPeers = new Set(desiredList);
+    const currentPeers = new Set(conns.keys());
+
+    console.log('[WebRTC] Sync peers', {
+      mode,
+      desired: desiredList,
+      current: Array.from(currentPeers),
     });
 
-    currentPeers.forEach((peerId) => {
+    // Process offers from peers who connected before we enabled A/V first — must run BEFORE
+    // creating placeholder peer connections; otherwise we hit `conns.has` and dropped the SDP.
+    const offersCopy = new Map(pendingOffersRef.current);
+    pendingOffersRef.current.clear();
+    offersCopy.forEach(({ sdp }, rawFromId) => {
+      const fromId = canonicalUserId(rawFromId);
+      if (!desiredPeers.has(fromId)) {
+        pendingOffersRef.current.set(fromId, { sdp });
+        return;
+      }
+      applyRemoteOffer(fromId, sdp).catch((err) =>
+        console.error('[WebRTC] Error processing pending offer:', err)
+      );
+    });
+
+    desiredPeers.forEach((peerId) => {
+      // createPeerConnection itself guards against duplicates via inFlightPeersRef + store check
+      const isInitiator = currentUser.id < peerId;
+      createPeerConnection(peerId, isInitiator);
+    });
+
+    Array.from(useStore.getState().peerConnections.keys()).forEach((peerId) => {
       if (!desiredPeers.has(peerId)) {
         pendingIceRef.current.delete(peerId);
         pendingOffersRef.current.delete(peerId);
+        inFlightPeersRef.current.delete(peerId);
         removePeerConnection(peerId);
       }
     });
+  }, [
+    nearbyAvEnabled,
+    localStream,
+    user?.id,
+    avScope,
+    peerAvScopes,
+    proximityPeers,
+    presence,
+    createPeerConnection,
+    applyRemoteOffer,
+    removePeerConnection,
+  ]);
 
-    // Process offers that arrived while A/V was disabled
-    const offersCopy = new Map(pendingOffersRef.current);
-    pendingOffersRef.current.clear();
-    offersCopy.forEach(({ sdp }, fromUserId) => {
-      const connsNow = useStore.getState().peerConnections;
-      if (connsNow.has(fromUserId)) return;
-      const pc = createPeerConnection(fromUserId, false);
-      if (!pc) return;
-      pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
-        .then(() => pc.createAnswer())
-        .then((answer) => pc.setLocalDescription(answer))
-        .then(() => {
-          const ws = getWs();
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: 'client.webrtc.answer',
-                payload: { to_user_id: fromUserId, sdp: pc.localDescription?.sdp },
-              })
-            );
-          }
-          drainIceQueue(fromUserId);
-        })
-        .catch((err) => console.error('[WebRTC] Error processing pending offer:', err));
-    });
-  }, [nearbyAvEnabled, localStream, proximityPeers, createPeerConnection, removePeerConnection, getWs, drainIceQueue]);
-
-  // Main connection effect
+  // Main connection effect (token + spaceId + wsReconnectTick; message handler via ref)
   useEffect(() => {
     if (!token || !spaceId) {
       console.log('[WebSocket] Missing token or spaceId, not connecting');
       return;
     }
-    
-    // Check if already connected or connecting
-    const existingWs = wsRef.current;
-    if (existingWs) {
-      const state = existingWs.readyState;
-      if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
-        console.log('[WebSocket] Already connected/connecting, skipping');
-        return;
-      }
-    }
-    
+
     if (isConnectingRef.current) {
       console.log('[WebSocket] Connection attempt already in progress');
       return;
     }
+
+    let cancelled = false;
 
     console.log('[WebSocket] Starting new connection to space:', spaceId);
     isConnectingRef.current = true;
@@ -609,13 +685,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     wsRef.current = socket;
 
     socket.onopen = () => {
+      if (cancelled) return;
       console.log('[WebSocket] Connected successfully');
       isConnectingRef.current = false;
       setWsConnected(true);
       setWs(socket);
     };
 
-    socket.onmessage = handleMessage;
+    socket.onmessage = (event: MessageEvent) => {
+      handleMessageRef.current(event);
+    };
 
     socket.onclose = (event) => {
       console.log('[WebSocket] Closed with code:', event.code, 'reason:', event.reason);
@@ -631,29 +710,33 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       // Clean up peer connections on disconnect
       pendingIceRef.current.clear();
       pendingOffersRef.current.clear();
+      inFlightPeersRef.current.clear();
       clearPeerConnections();
 
-      // Only attempt reconnect for unexpected closures
-      if (event.code !== 1000 && event.code !== 1001) {
-        console.log('[WebSocket] Unexpected close, will attempt reconnect');
+      // Abnormal close (e.g. 1006): schedule reconnect by bumping tick so this effect re-runs
+      if (!cancelled && event.code !== 1000 && event.code !== 1001) {
+        console.log('[WebSocket] Unexpected close, scheduling reconnect in 2s');
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
         reconnectTimeoutRef.current = setTimeout(() => {
-          if (wsRef.current === null) {
-            isConnectingRef.current = false;
-            // The effect will re-run and create a new connection
+          if (!cancelled && wsRef.current === null) {
+            setWsReconnectTick((t) => t + 1);
           }
         }, 2000);
       }
     };
 
-    socket.onerror = (event) => {
-      console.error('[WebSocket] Error:', event);
+    socket.onerror = () => {
+      if (cancelled) return;
       isConnectingRef.current = false;
+      console.warn(
+        '[WebSocket] Connection error. Check NEXT_PUBLIC_API_BASE matches your API (HTTPS sites need https:// so WebSocket uses wss://), and that the server is reachable.'
+      );
     };
 
     return () => {
+      cancelled = true;
       console.log('[WebSocket] Cleanup triggered');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -668,9 +751,10 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       isConnectingRef.current = false;
       pendingIceRef.current.clear();
       pendingOffersRef.current.clear();
+      inFlightPeersRef.current.clear();
       clearPeerConnections();
     };
-  }, [token, spaceId, handleMessage, setWs, setWsConnected, clearPeerConnections]);
+  }, [token, spaceId, wsReconnectTick, setWs, setWsConnected, clearPeerConnections]);
 
   // Get WebSocket from store for sending messages (more reliable than ref during remounts)
   const storeWs = useStore((state) => state.ws);

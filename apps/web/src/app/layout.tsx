@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Gather Clone',
-  description: 'Virtual office with proximity audio/video',
+  title: 'SphereMeet — Virtual Office',
+  description: 'Proximity audio/video virtual workspace',
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen">{children}</body>
+      <body className="min-h-screen" style={{ imageRendering: 'pixelated' }}>{children}</body>
     </html>
   );
 }

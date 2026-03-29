@@ -2,6 +2,8 @@
 
 A production-quality MVP inspired by Gather + Slack + Zoom with TRUE PROXIMITY AUDIO/VIDEO.
 
+**Implementation map (what exists vs gaps):** see [APPLICATION_TRACKER.md](APPLICATION_TRACKER.md).
+
 ## Features
 
 - **Activity Mode**: Virtual office map with proximity-based audio/video
@@ -212,6 +214,11 @@ gather-clone/
    - Missing peers → DISCONNECT
 3. **Offer Initiation Rule**: Lower user_id (lexicographic) initiates
 4. STUN server: `stun:stun.l.google.com:19302`
+
+## Additional requirements
+
+1. API documentation
+2. Dockerised services deployable to cloud
 
 ## License
 

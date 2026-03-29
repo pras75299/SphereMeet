@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
 use futures::{sink::SinkExt, stream::StreamExt};
@@ -16,7 +17,9 @@ use uuid::Uuid;
 
 use crate::auth::verify_token;
 use crate::db;
-use crate::state::{AppState, CachedMapData, CachedZone, CHANNEL_CAPACITY, PROXIMITY_SIGNAL_GRACE_MS};
+use crate::state::{
+    AppState, AvScope, CachedMapData, CachedZone, CHANNEL_CAPACITY, PROXIMITY_SIGNAL_GRACE_MS,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
@@ -40,14 +43,26 @@ pub async fn ws_handler(
     let claims = match verify_token(&query.token) {
         Ok(c) => c,
         Err(_) => {
-            return Response::builder()
-                .status(401)
-                .body("Unauthorized".into())
-                .unwrap();
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "error": "Unauthorized", "code": 401 })),
+            )
+                .into_response();
         }
     };
 
     ws.on_upgrade(move |socket| handle_socket(socket, state, claims.sub, claims.display_name, query.space_id))
+}
+
+/// Serialize a `WsMessage` to JSON string; logs and returns `None` on failure (prevents task panic).
+fn serialize_msg(msg: &WsMessage) -> Option<String> {
+    match serde_json::to_string(msg) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("Failed to serialize WsMessage type={}: {:?}", msg.msg_type, e);
+            None
+        }
+    }
 }
 
 async fn handle_socket(
@@ -57,6 +72,12 @@ async fn handle_socket(
     display_name: String,
     space_id: Uuid,
 ) {
+    // Cache map/zones before add_client so spawn positions use walkable tiles and avoid races
+    if let Err(e) = ensure_space_cached(&state, space_id).await {
+        tracing::error!("Failed to load space {} for join: {:?}", space_id, e);
+        return;
+    }
+
     let (mut sender, mut receiver) = socket.split();
     
     // Use bounded channel to prevent memory exhaustion from slow clients
@@ -88,9 +109,11 @@ async fn handle_socket(
                 "display_name": display_name
             }),
         };
-        state.broadcast_to_space(space_id, &serde_json::to_string(&msg).unwrap(), Some(user_id)).await;
+        if let Some(text) = serialize_msg(&msg) {
+            state.broadcast_to_space(space_id, &text, Some(user_id)).await;
+        }
     }
-    // Broadcast full presence snapshot to everyone so all clients stay in sync (fixes avatars disappearing after rejoin)
+    // Broadcast full presence snapshot to everyone so all clients stay in sync
     let snapshot_msg = WsMessage {
         msg_type: "server.presence.snapshot".to_string(),
         payload: json!({
@@ -104,7 +127,9 @@ async fn handle_socket(
             })).collect::<Vec<_>>()
         }),
     };
-    state.broadcast_to_space(space_id, &serde_json::to_string(&snapshot_msg).unwrap(), None).await;
+    if let Some(text) = serialize_msg(&snapshot_msg) {
+        state.broadcast_to_space(space_id, &text, None).await;
+    }
 
     // Compute initial proximity
     let proximity_changes = state.compute_proximity(space_id).await;
@@ -116,7 +141,9 @@ async fn handle_socket(
                     "peers": peers.into_iter().collect::<Vec<_>>()
                 }),
             };
-            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+            if let Some(text) = serialize_msg(&msg) {
+                let _ = sender.try_send(text);
+            }
         }
     }
 
@@ -166,7 +193,9 @@ async fn handle_socket(
                                     "peers": peers.into_iter().collect::<Vec<_>>()
                                 }),
                             };
-                            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+                            if let Some(text) = serialize_msg(&msg) {
+                                let _ = sender.try_send(text);
+                            }
                         }
                     }
                 }
@@ -216,7 +245,9 @@ async fn handle_socket(
         msg_type: "server.presence.leave".to_string(),
         payload: json!({ "user_id": user_id }),
     };
-    state.broadcast_to_space(space_id, &serde_json::to_string(&leave_msg).unwrap(), Some(user_id)).await;
+    if let Some(text) = serialize_msg(&leave_msg) {
+        state.broadcast_to_space(space_id, &text, Some(user_id)).await;
+    }
 
     state.remove_client(space_id, user_id).await;
     tracing::info!("User {} left space {}", user_id, space_id);
@@ -231,9 +262,56 @@ async fn handle_socket(
                     "peers": peers.into_iter().collect::<Vec<_>>()
                 }),
             };
-            let _ = sender.try_send(serde_json::to_string(&msg).unwrap());
+            if let Some(text) = serialize_msg(&msg) {
+                let _ = sender.try_send(text);
+            }
         }
     }
+}
+
+/// Load map and zones from DB and cache for movement validation. Call before `add_client` so spawn uses cached map.
+async fn ensure_space_cached(
+    state: &AppState,
+    space_id: Uuid,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _space = db::get_space(&state.pool, space_id)
+        .await?
+        .ok_or("Space not found")?;
+    let map = db::get_map_for_space(&state.pool, space_id).await?;
+    let zones = db::get_zones_for_space(&state.pool, space_id).await?;
+
+    if let Some(ref m) = map {
+        let blocked_set: HashSet<i32> = m
+            .blocked
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_i64().map(|n| n as i32)).collect())
+            .unwrap_or_default();
+
+        state
+            .cache_map_data(
+                space_id,
+                CachedMapData {
+                    width: m.width,
+                    height: m.height,
+                    blocked: blocked_set,
+                },
+            )
+            .await;
+    }
+
+    let cached_zones: Vec<CachedZone> = zones
+        .iter()
+        .map(|z| CachedZone {
+            id: z.id,
+            name: z.name.clone(),
+            x: z.x,
+            y: z.y,
+            w: z.w,
+            h: z.h,
+        })
+        .collect();
+    state.cache_zones(space_id, cached_zones).await;
+    Ok(())
 }
 
 async fn send_joined_message(
@@ -243,13 +321,13 @@ async fn send_joined_message(
     display_name: &str,
     space_id: Uuid,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Get space details
+    // Map/zones already cached in ensure_space_cached; refresh cache idempotently from DB for joined payload
     let space = db::get_space(&state.pool, space_id).await?.ok_or("Space not found")?;
     let map = db::get_map_for_space(&state.pool, space_id).await?;
     let zones = db::get_zones_for_space(&state.pool, space_id).await?;
     let presence = state.get_presence_list(space_id).await;
 
-    // Cache map data for fast validation
+    // Cache map data for fast validation (idempotent with ensure_space_cached)
     if let Some(ref m) = map {
         let blocked_set: HashSet<i32> = m.blocked
             .as_array()
@@ -273,6 +351,8 @@ async fn send_joined_message(
         h: z.h,
     }).collect();
     state.cache_zones(space_id, cached_zones).await;
+
+    let av_scopes = state.av_scopes_json_for_space(space_id).await;
 
     let msg = WsMessage {
         msg_type: "server.joined".to_string(),
@@ -307,7 +387,8 @@ async fn send_joined_message(
                 "y": p.y,
                 "dir": p.dir,
                 "zone_id": p.zone_id
-            })).collect::<Vec<_>>()
+            })).collect::<Vec<_>>(),
+            "av_scopes": av_scopes
         }),
     };
 
@@ -332,6 +413,9 @@ async fn handle_client_message(
         }
         "client.chat.send" => {
             handle_chat_send(state, user_id, space_id, &msg.payload).await?;
+        }
+        "client.av.scope" => {
+            handle_av_scope(state, user_id, space_id, &msg.payload).await?;
         }
         "client.webrtc.offer" => {
             handle_webrtc_signal(state, user_id, space_id, "server.webrtc.offer", &msg.payload).await?;
@@ -366,7 +450,18 @@ async fn handle_move(
     }
 
     // Validate move using cached data (no DB query!)
-    state.validate_move(space_id, x, y).await?;
+    if let Err(reason) = state.validate_move(space_id, x, y).await {
+        if let Some(sender) = state.get_client_sender(space_id, user_id).await {
+            let msg = WsMessage {
+                msg_type: "server.move.rejected".to_string(),
+                payload: json!({ "reason": reason }),
+            };
+            if let Ok(text) = serde_json::to_string(&msg) {
+                let _ = sender.try_send(text);
+            }
+        }
+        return Ok(());
+    }
 
     // Find zone using cached data (no DB query!)
     let zone_id = state.find_zone_for_position(space_id, x, y).await;
@@ -374,16 +469,9 @@ async fn handle_move(
     // Update presence
     state.update_presence(space_id, user_id, x, y, dir, zone_id).await;
 
-    // Get display_name for broadcast
-    let display_name = {
-        let presence_list = state.get_presence_list(space_id).await;
-        presence_list
-            .iter()
-            .find(|p| p.user_id == user_id)
-            .map(|p| p.display_name.clone())
-    };
+    let display_name = state.display_name_for_user(space_id, user_id).await;
 
-    // Broadcast position update
+    // Broadcast position update (always send string so clients never overwrite with null → "Unknown")
     let msg = WsMessage {
         msg_type: "server.presence.update".to_string(),
         payload: json!({
@@ -427,8 +515,8 @@ async fn handle_chat_send(
         return Err("Empty message".into());
     }
 
-    // Enforce maximum message length (1000 chars)
-    if body.len() > 1000 {
+    // Enforce maximum message length (1000 Unicode scalar values, not bytes)
+    if body.chars().count() > 1000 {
         return Err("Message too long (max 1000 characters)".into());
     }
 
@@ -460,6 +548,37 @@ async fn handle_chat_send(
     Ok(())
 }
 
+async fn handle_av_scope(
+    state: &AppState,
+    user_id: Uuid,
+    space_id: Uuid,
+    payload: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let scope_str = payload["scope"].as_str().ok_or("Missing scope")?;
+    let scope = match scope_str {
+        "space" => AvScope::Space,
+        "proximity" => AvScope::Proximity,
+        _ => return Err("Invalid scope (use proximity or space)".into()),
+    };
+
+    state
+        .set_user_av_scope(space_id, user_id, scope)
+        .await;
+
+    let msg = WsMessage {
+        msg_type: "server.av.scope_changed".to_string(),
+        payload: json!({
+            "user_id": user_id,
+            "scope": scope_str,
+        }),
+    };
+    state
+        .broadcast_to_space(space_id, &serde_json::to_string(&msg)?, None)
+        .await;
+
+    Ok(())
+}
+
 async fn handle_webrtc_signal(
     state: &AppState,
     from_user_id: Uuid,
@@ -470,23 +589,38 @@ async fn handle_webrtc_signal(
     let to_user_id_str = payload["to_user_id"].as_str().ok_or("Missing to_user_id")?;
     let to_user_id = Uuid::parse_str(to_user_id_str)?;
 
-    // Check if users are in proximity or within grace period
-    let in_proximity = state.is_in_proximity(space_id, from_user_id, to_user_id).await;
-    
-    if !in_proximity {
-        // Check grace period
-        let grace_duration = Duration::milliseconds(PROXIMITY_SIGNAL_GRACE_MS as i64);
-        let last_updated = state.get_proximity_last_updated(space_id, from_user_id).await;
-        
-        if let Some(last) = last_updated {
-            if Utc::now() - last > grace_duration {
-                tracing::warn!("Dropping signaling message: users not in proximity");
-                return Ok(());
-            }
+    let space_mesh = state
+        .both_users_space_av_scope(space_id, from_user_id, to_user_id)
+        .await;
+
+    // Meetings (space scope): allow signaling between any two space-scoped users in the office.
+    // Activity (proximity): require proximity cache match or grace period after leaving range.
+    let mut allowed = space_mesh;
+
+    if !allowed {
+        let in_proximity = state
+            .is_in_proximity(space_id, from_user_id, to_user_id)
+            .await;
+
+        if in_proximity {
+            allowed = true;
         } else {
-            tracing::warn!("Dropping signaling message: no proximity data");
-            return Ok(());
+            let grace_duration = Duration::milliseconds(PROXIMITY_SIGNAL_GRACE_MS as i64);
+            let last_updated = state
+                .get_proximity_last_updated(space_id, from_user_id)
+                .await;
+
+            if let Some(last) = last_updated {
+                if Utc::now() - last <= grace_duration {
+                    allowed = true;
+                }
+            }
         }
+    }
+
+    if !allowed {
+        tracing::warn!("Dropping signaling message: not allowed (proximity / space mesh)");
+        return Ok(());
     }
 
     // Forward the message

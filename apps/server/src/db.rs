@@ -1,9 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppResult;
+
+/// Default demo space; created at server startup (idempotent).
+pub const MAIN_OFFICE_NAME: &str = "Main Office";
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
@@ -293,6 +297,49 @@ pub async fn create_zone(
     .await?;
 
     Ok(zone)
+}
+
+/// Ensure Main Office exists with the standard floor map and zones. Idempotent.
+pub async fn ensure_main_office(pool: &PgPool) -> AppResult<Uuid> {
+    if let Some(space) = get_space_by_name(pool, MAIN_OFFICE_NAME).await? {
+        if get_map_for_space(pool, space.id).await?.is_none() {
+            populate_main_office_floor(pool, space.id).await?;
+        }
+        return Ok(space.id);
+    }
+    let space = create_space(pool, MAIN_OFFICE_NAME).await?;
+    populate_main_office_floor(pool, space.id).await?;
+    Ok(space.id)
+}
+
+async fn populate_main_office_floor(pool: &PgPool, space_id: Uuid) -> AppResult<()> {
+    const WIDTH: i32 = 20;
+    const HEIGHT: i32 = 15;
+    let tile_count = WIDTH * HEIGHT;
+    let tiles: Vec<i32> = vec![1; tile_count as usize];
+    let mut blocked: Vec<i32> = Vec::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if x == 0 || x == WIDTH - 1 || y == 0 || y == HEIGHT - 1 {
+                blocked.push(y * WIDTH + x);
+            }
+        }
+    }
+    create_map(
+        pool,
+        space_id,
+        Some("Office Floor"),
+        WIDTH,
+        HEIGHT,
+        json!(tiles),
+        json!(blocked),
+    )
+    .await?;
+    create_zone(pool, space_id, Some("Meeting Room A"), 2, 2, 4, 4).await?;
+    create_zone(pool, space_id, Some("Meeting Room B"), 14, 2, 4, 4).await?;
+    create_zone(pool, space_id, Some("Lounge"), 8, 8, 4, 4).await?;
+    create_zone(pool, space_id, Some("Kitchen"), 2, 9, 4, 4).await?;
+    Ok(())
 }
 
 // Chat operations

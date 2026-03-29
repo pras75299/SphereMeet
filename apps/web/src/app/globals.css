@@ -137,10 +137,7 @@ body {
   letter-spacing: 0.04em;
 }
 
-/* Status pixel badge */
-.pixel-badge-on  { display: inline-block; width: 6px; height: 6px; background: #22c55e; }
-.pixel-badge-off { display: inline-block; width: 6px; height: 6px; background: #ef4444; }
-.pixel-badge-warn{ display: inline-block; width: 6px; height: 6px; background: #facc15; }
+/* Status pixel badge — definitions below in animations section */
 
 /* ─────────────────────────────────────────────────────────
    Custom scrollbar — pixel style
@@ -149,3 +146,67 @@ body {
 ::-webkit-scrollbar-track { background: var(--surface); }
 ::-webkit-scrollbar-thumb { background: var(--outline-dim); border-radius: 0; }
 ::-webkit-scrollbar-thumb:hover { background: var(--outline); }
+
+/* ─────────────────────────────────────────────────────────
+   Pixel Art Keyframe Animations
+   ───────────────────────────────────────────────────────── */
+
+/* Square pixel-art aura for self avatar — NO border-radius */
+@keyframes pixel-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%       { opacity: 0.55; }
+}
+
+/* Coffee machine / kettle steam rising */
+@keyframes steam {
+  0%   { opacity: 0;   transform: translateY(0px)   scaleX(1.0); }
+  30%  { opacity: 0.8; transform: translateY(-6px)  scaleX(1.3); }
+  70%  { opacity: 0.4; transform: translateY(-12px) scaleX(0.8); }
+  100% { opacity: 0;   transform: translateY(-18px) scaleX(0.5); }
+}
+
+/* 1-bit status badge flicker — Amber: fast, Green: slow */
+@keyframes badge-flicker {
+  0%, 93%, 97%, 100% { opacity: 1;   }
+  94%, 98%           { opacity: 0.1; }
+  95%, 99%           { opacity: 0.9; }
+  96%                { opacity: 0.3; }
+}
+
+/* ─────────────────────────────────────────────────────────
+   Updated badge classes — square, animated
+   ───────────────────────────────────────────────────────── */
+.pixel-badge-on   {
+  display: inline-block;
+  width: 6px; height: 6px;
+  background: #22c55e;
+  border-radius: 0;
+  animation: badge-flicker 6s infinite;
+}
+.pixel-badge-off  {
+  display: inline-block;
+  width: 6px; height: 6px;
+  background: #ef4444;
+  border-radius: 0;
+}
+.pixel-badge-warn {
+  display: inline-block;
+  width: 6px; height: 6px;
+  background: #facc15;
+  border-radius: 0;
+  animation: badge-flicker 2.5s infinite;
+}
+
+/* ─────────────────────────────────────────────────────────
+   Terminal cursor blink (amber)
+   ───────────────────────────────────────────────────────── */
+@keyframes cursor-blink {
+  0%, 49%  { opacity: 1; }
+  50%, 100%{ opacity: 0; }
+}
+.pixel-cursor::after {
+  content: '▋';
+  color: var(--secondary);
+  animation: cursor-blink 1s step-end infinite;
+  margin-left: 2px;
+}

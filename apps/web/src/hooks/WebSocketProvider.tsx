@@ -167,15 +167,16 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const getWs = useCallback(() => wsRef.current ?? useStore.getState().ws ?? null, []);
 
   const drainIceQueue = useCallback((peerId: string) => {
-    const queue = pendingIceRef.current.get(peerId);
+    const id = canonicalUserId(peerId);
+    const queue = pendingIceRef.current.get(id);
     if (!queue?.length) return;
-    const peerConn = useStore.getState().peerConnections.get(peerId);
+    const peerConn = useStore.getState().peerConnections.get(id);
     if (!peerConn?.pc?.remoteDescription) return;
     const pc = peerConn.pc;
-    pendingIceRef.current.delete(peerId);
+    pendingIceRef.current.delete(id);
     queue.forEach((candidate) => {
       pc.addIceCandidate(new RTCIceCandidate(candidate))
-        .then(() => console.log('[WebRTC] Added queued ICE candidate for', peerId))
+        .then(() => console.log('[WebRTC] Added queued ICE candidate for', id))
         .catch((err) => console.error('[WebRTC] Error adding queued ICE candidate:', err));
     });
   }, []);
@@ -312,6 +313,46 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     [setPeerConnection, updatePeerStream, getWs]
   );
 
+  /** Apply remote SDP offer: create PC if needed, answer, send — shared by WS handler and pending-offer drain. */
+  const applyRemoteOffer = useCallback(
+    (rawPeerId: string, sdp: string) => {
+      const fromId = canonicalUserId(rawPeerId);
+      const peerConnections = useStore.getState().peerConnections;
+      const existing = peerConnections.get(fromId);
+      if (existing?.pc?.remoteDescription) {
+        console.log('[WebRTC] Skip offer; remote description already set for', fromId);
+        return Promise.resolve();
+      }
+
+      let pc: RTCPeerConnection;
+      if (!existing) {
+        const newPc = createPeerConnection(fromId, false);
+        if (!newPc) return Promise.reject(new Error('Cannot create peer connection'));
+        pc = newPc;
+      } else {
+        pc = existing.pc;
+      }
+
+      return pc
+        .setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
+        .then(() => pc.createAnswer())
+        .then((answer) => pc.setLocalDescription(answer))
+        .then(() => {
+          const ws = getWs();
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: 'client.webrtc.answer',
+                payload: { to_user_id: fromId, sdp: pc.localDescription?.sdp },
+              })
+            );
+          }
+          drainIceQueue(fromId);
+        });
+    },
+    [createPeerConnection, getWs, drainIceQueue]
+  );
+
   const handleMessage = useCallback(
     (event: MessageEvent) => {
       try {
@@ -432,8 +473,9 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             const currentUser = userRef.current;
             const currentNearbyAvEnabled = nearbyAvEnabledRef.current;
             const currentLocalStream = localStreamRef.current;
+            const fromId = canonicalUserId(payload.from_user_id);
 
-            console.log('[WebRTC] Received offer from', payload.from_user_id, {
+            console.log('[WebRTC] Received offer from', fromId, {
               avEnabled: currentNearbyAvEnabled,
               hasStream: !!currentLocalStream
             });
@@ -442,86 +484,60 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
 
             if (!currentUser || !currentNearbyAvEnabled || !currentLocalStream) {
               console.log('[WebRTC] Storing offer – will process when A/V is enabled');
-              pendingOffersRef.current.set(payload.from_user_id, { sdp: payload.sdp });
+              pendingOffersRef.current.set(fromId, { sdp: payload.sdp });
               return;
             }
 
-            const peerConnections = useStore.getState().peerConnections;
-            let peerConn = peerConnections.get(payload.from_user_id);
-            let pc: RTCPeerConnection;
-
-            if (!peerConn) {
-              const newPc = createPeerConnection(payload.from_user_id, false);
-              if (!newPc) return;
-              pc = newPc;
-            } else {
-              pc = peerConn.pc;
-            }
-
-            pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }))
-              .then(() => pc.createAnswer())
-              .then((answer) => pc.setLocalDescription(answer))
-              .then(() => {
-                const ws = getWs();
-                if (ws?.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: 'client.webrtc.answer',
-                      payload: {
-                        to_user_id: payload.from_user_id,
-                        sdp: pc.localDescription?.sdp,
-                      },
-                    })
-                  );
-                }
-                drainIceQueue(payload.from_user_id);
-              })
-              .catch((err) => console.error('Error handling offer:', err));
+            applyRemoteOffer(fromId, payload.sdp).catch((err) =>
+              console.error('Error handling offer:', err)
+            );
             break;
           }
           case 'server.webrtc.answer': {
             const payload = message.payload as WebRTCSignalPayload;
-            console.log('[WebRTC] Received answer from', payload.from_user_id);
+            const fromId = canonicalUserId(payload.from_user_id);
+            console.log('[WebRTC] Received answer from', fromId);
             if (!payload.sdp) return;
 
             const peerConnections = useStore.getState().peerConnections;
-            const peerConn = peerConnections.get(payload.from_user_id);
+            const peerConn = peerConnections.get(fromId);
             if (!peerConn) {
-              console.log('[WebRTC] No peer connection found for answer from', payload.from_user_id);
+              console.log('[WebRTC] No peer connection found for answer from', fromId);
               return;
             }
 
             peerConn.pc
               .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }))
               .then(() => {
-                console.log('[WebRTC] Set remote description (answer) for', payload.from_user_id);
-                drainIceQueue(payload.from_user_id);
+                console.log('[WebRTC] Set remote description (answer) for', fromId);
+                drainIceQueue(fromId);
               })
               .catch((err) => console.error('Error handling answer:', err));
             break;
           }
           case 'server.webrtc.ice': {
             const payload = message.payload as WebRTCSignalPayload;
-            console.log('[WebRTC] Received ICE candidate from', payload.from_user_id);
+            const fromId = canonicalUserId(payload.from_user_id);
+            console.log('[WebRTC] Received ICE candidate from', fromId);
             if (!payload.candidate) return;
 
             const peerConnections = useStore.getState().peerConnections;
-            const peerConn = peerConnections.get(payload.from_user_id);
+            const peerConn = peerConnections.get(fromId);
             if (!peerConn) {
-              console.log('[WebRTC] No peer connection found for ICE from', payload.from_user_id);
+              console.log('[WebRTC] No peer connection found for ICE from', fromId);
               return;
             }
 
             const pc = peerConn.pc;
             if (!pc.remoteDescription) {
-              const queue = pendingIceRef.current.get(payload.from_user_id) ?? [];
+              const queue = pendingIceRef.current.get(fromId) ?? [];
               queue.push(payload.candidate);
-              pendingIceRef.current.set(payload.from_user_id, queue);
-              console.log('[WebRTC] Queued ICE candidate for', payload.from_user_id, '(no remote description yet)');
+              pendingIceRef.current.set(fromId, queue);
+              console.log('[WebRTC] Queued ICE candidate for', fromId, '(no remote description yet)');
               return;
             }
             pc.addIceCandidate(new RTCIceCandidate(payload.candidate))
-              .then(() => console.log('[WebRTC] Added ICE candidate for', payload.from_user_id))
+              .then(() => console.log('[WebRTC] Added ICE candidate for', fromId))
               .catch((err) => console.error('Error adding ICE candidate:', err));
             break;
           }
@@ -540,7 +556,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       setProximityPeers,
       patchPeerAvScope,
       addChatMessage,
-      createPeerConnection,
+      applyRemoteOffer,
       removePeerConnection,
       getWs,
       drainIceQueue,
@@ -587,48 +603,34 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       current: Array.from(currentPeers),
     });
 
+    // Process offers from peers who connected before we enabled A/V first — must run BEFORE
+    // creating placeholder peer connections; otherwise we hit `conns.has` and dropped the SDP.
+    const offersCopy = new Map(pendingOffersRef.current);
+    pendingOffersRef.current.clear();
+    offersCopy.forEach(({ sdp }, rawFromId) => {
+      const fromId = canonicalUserId(rawFromId);
+      if (!desiredPeers.has(fromId)) {
+        pendingOffersRef.current.set(fromId, { sdp });
+        return;
+      }
+      applyRemoteOffer(fromId, sdp).catch((err) =>
+        console.error('[WebRTC] Error processing pending offer:', err)
+      );
+    });
+
     desiredPeers.forEach((peerId) => {
-      if (!currentPeers.has(peerId)) {
+      if (!useStore.getState().peerConnections.has(peerId)) {
         const isInitiator = currentUser.id < peerId;
         createPeerConnection(peerId, isInitiator);
       }
     });
 
-    currentPeers.forEach((peerId) => {
+    Array.from(useStore.getState().peerConnections.keys()).forEach((peerId) => {
       if (!desiredPeers.has(peerId)) {
         pendingIceRef.current.delete(peerId);
         pendingOffersRef.current.delete(peerId);
         removePeerConnection(peerId);
       }
-    });
-
-    const offersCopy = new Map(pendingOffersRef.current);
-    pendingOffersRef.current.clear();
-    offersCopy.forEach(({ sdp }, fromUserId) => {
-      const connsNow = useStore.getState().peerConnections;
-      if (connsNow.has(fromUserId)) return;
-      if (!desiredPeers.has(fromUserId)) {
-        pendingOffersRef.current.set(fromUserId, { sdp });
-        return;
-      }
-      const pc = createPeerConnection(fromUserId, false);
-      if (!pc) return;
-      pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }))
-        .then(() => pc.createAnswer())
-        .then((answer) => pc.setLocalDescription(answer))
-        .then(() => {
-          const ws = getWs();
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: 'client.webrtc.answer',
-                payload: { to_user_id: fromUserId, sdp: pc.localDescription?.sdp },
-              })
-            );
-          }
-          drainIceQueue(fromUserId);
-        })
-        .catch((err) => console.error('[WebRTC] Error processing pending offer:', err));
     });
   }, [
     nearbyAvEnabled,
@@ -639,9 +641,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     proximityPeers,
     presence,
     createPeerConnection,
+    applyRemoteOffer,
     removePeerConnection,
-    getWs,
-    drainIceQueue,
   ]);
 
   // Main connection effect (token + spaceId + wsReconnectTick; message handler via ref)

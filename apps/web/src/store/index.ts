@@ -342,25 +342,28 @@ export const useStore = create<AppState>((set, get) => ({
   // Peer Connections
   peerConnections: new Map(),
   setPeerConnection: (userId, pc, remoteStream) => {
+    const id = canonicalUserId(userId);
     set((state) => {
       const newPeerConnections = new Map(state.peerConnections);
-      newPeerConnections.set(userId, { pc, remoteStream });
+      newPeerConnections.set(id, { pc, remoteStream });
       return { peerConnections: newPeerConnections };
     });
   },
   updatePeerStream: (userId, stream) => {
+    const id = canonicalUserId(userId);
     set((state) => {
       const newPeerConnections = new Map(state.peerConnections);
-      const existing = newPeerConnections.get(userId);
+      const existing = newPeerConnections.get(id);
       if (existing) {
-        newPeerConnections.set(userId, { ...existing, remoteStream: stream });
+        newPeerConnections.set(id, { ...existing, remoteStream: stream });
       }
       return { peerConnections: newPeerConnections };
     });
   },
   removePeerConnection: (userId) => {
+    const id = canonicalUserId(userId);
     const state = get();
-    const peerConn = state.peerConnections.get(userId);
+    const peerConn = state.peerConnections.get(id);
     if (peerConn) {
       peerConn.pc.getSenders().forEach((sender) => {
         try {
@@ -373,7 +376,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set((state) => {
       const newPeerConnections = new Map(state.peerConnections);
-      newPeerConnections.delete(userId);
+      newPeerConnections.delete(id);
       return { peerConnections: newPeerConnections };
     });
   },

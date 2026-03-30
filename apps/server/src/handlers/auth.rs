@@ -91,9 +91,9 @@ pub async fn register(
     if !is_valid_email(&email) {
         return Err(AppError::BadRequest("Invalid email address".to_string()));
     }
-    if password.len() < 8 {
+    if password.len() < 8 || password.len() > 128 {
         return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".to_string(),
+            "Password must be 8-128 characters".to_string(),
         ));
     }
     if display_name.is_empty() || display_name.len() > 50 {
@@ -119,7 +119,7 @@ pub async fn register(
     let user = match db::create_registered_user(&state.pool, &email, &display_name, &password_hash).await {
         Ok(u) => u,
         Err(AppError::Database(e)) if is_unique_violation(&e) => {
-            return Err(AppError::Conflict(
+            return Err(AppError::BadRequest(
                 "Registration failed. Try a different email or log in.".to_string(),
             ));
         }
@@ -148,6 +148,10 @@ pub async fn login(
 ) -> AppResult<Json<AuthResponse>> {
     let email = payload.email.trim().to_lowercase();
     let password = payload.password.clone();
+
+    if password.len() > 128 {
+        return Err(AppError::Unauthorized);
+    }
 
     let user_creds = db::get_user_by_email(&state.pool, &email).await?;
 

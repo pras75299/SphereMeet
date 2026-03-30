@@ -163,22 +163,20 @@ export default function HomePage() {
             </p>
           </div>
 
-          {/* Card */}
+          {/* Card — background shift + L-corner accents, no line borders */}
           <div
-            className="pixel-shadow"
+            className="pixel-frame"
             style={{
               background: "var(--surface-mid)",
-              outline: "1px solid rgba(192,193,255,0.20)",
-              boxShadow: "4px 4px 0px var(--surface-low)",
+              boxShadow: "4px 4px 0px var(--background)",
             }}
           >
-            {/* Tab bar */}
+            {/* Tab bar — surface-low vs surface-mid colour shift is the division */}
             <div
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr 1fr",
                 background: "var(--surface-low)",
-                borderBottom: "2px solid rgba(192,193,255,0.12)",
               }}
             >
               {(["login", "register"] as AuthTab[]).map((tab) => (

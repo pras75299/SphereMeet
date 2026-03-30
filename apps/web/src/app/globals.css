@@ -144,17 +144,18 @@ body {
   background: var(--background);
   border: none;
   border-radius: 0;
-  outline: 1px solid rgba(192, 193, 255, 0.15);
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--outline-dim);
   color: var(--foreground);
-  font-family: 'Share Tech Mono', monospace;
+  font-family: 'Space Grotesk', sans-serif;
   caret-color: var(--secondary);
-  transition: outline 80ms;
+  transition: box-shadow 80ms;
 }
 .pixel-input::placeholder {
   color: var(--outline-dim);
 }
 .pixel-input:focus {
-  outline: 1px solid var(--secondary);
+  box-shadow: inset 0 -2px 0 var(--secondary);
 }
 
 /* ─────────────────────────────────────────────────────────

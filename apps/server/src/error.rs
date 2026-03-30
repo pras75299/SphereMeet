@@ -26,6 +26,9 @@ pub enum AppError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 impl IntoResponse for AppError {
@@ -38,7 +41,7 @@ impl IntoResponse for AppError {
             }
             AppError::Jwt(e) => {
                 tracing::error!("JWT error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("JWT error: {}", e))
+                (StatusCode::UNAUTHORIZED, "Unauthorized".to_string())
             }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
@@ -47,6 +50,7 @@ impl IntoResponse for AppError {
                 tracing::error!("Internal error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
             }
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
 
         let body = Json(json!({ "error": message }));

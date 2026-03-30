@@ -125,6 +125,17 @@ pub async fn run_migrations(pool: &PgPool) -> AppResult<()> {
         }
     }
 
+    // Auth columns migration (idempotent — safe to run on existing databases)
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT"
+    ).execute(pool).await?;
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT"
+    ).execute(pool).await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"
+    ).execute(pool).await?;
+
     Ok(())
 }
 
@@ -151,6 +162,49 @@ pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<Option<User>> {
         "SELECT id, display_name, created_at FROM users WHERE id = $1",
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Internal type used only for auth — includes the stored password hash.
+#[derive(Debug, sqlx::FromRow)]
+pub struct UserWithCredentials {
+    pub id: Uuid,
+    pub display_name: String,
+    pub password_hash: Option<String>,
+}
+
+pub async fn create_registered_user(
+    pool: &PgPool,
+    email: &str,
+    display_name: &str,
+    password_hash: &str,
+) -> AppResult<User> {
+    let id = Uuid::new_v4();
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        INSERT INTO users (id, display_name, email, password_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, display_name, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(display_name)
+    .bind(email)
+    .bind(password_hash)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(user)
+}
+
+pub async fn get_user_by_email(pool: &PgPool, email: &str) -> AppResult<Option<UserWithCredentials>> {
+    let user = sqlx::query_as::<_, UserWithCredentials>(
+        "SELECT id, display_name, password_hash FROM users WHERE email = $1",
+    )
+    .bind(email)
     .fetch_optional(pool)
     .await?;
 

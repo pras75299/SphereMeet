@@ -139,6 +139,25 @@ body {
 
 /* Status pixel badge — definitions below in animations section */
 
+/* Terminal-style input — amber blinking cursor, deepest surface bg */
+.pixel-input {
+  background: var(--background);
+  border: none;
+  border-radius: 0;
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--outline-dim);
+  color: var(--foreground);
+  font-family: 'Space Grotesk', sans-serif;
+  caret-color: var(--secondary);
+  transition: box-shadow 80ms;
+}
+.pixel-input::placeholder {
+  color: var(--outline-dim);
+}
+.pixel-input:focus {
+  box-shadow: inset 0 -2px 0 var(--secondary);
+}
+
 /* ─────────────────────────────────────────────────────────
    Custom scrollbar — pixel style
    ───────────────────────────────────────────────────────── */

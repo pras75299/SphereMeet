@@ -142,6 +142,8 @@ async fn main() {
     };
 
     let api_routes = Router::new()
+        .route("/auth/register", post(handlers::auth::register))
+        .route("/auth/login", post(handlers::auth::login))
         .route("/auth/guest", post(handlers::auth::create_guest))
         .route("/dev/seed", post(handlers::dev::seed))
         .route("/spaces", get(handlers::spaces::list_spaces))

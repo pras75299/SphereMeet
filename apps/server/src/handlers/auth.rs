@@ -19,17 +19,31 @@ const DUMMY_HASH: &str =
 
 /// Simple RFC-5322-aware email validation (no external deps).
 fn is_valid_email(email: &str) -> bool {
-    let parts: Vec<&str> = email.splitn(2, '@').collect();
+    let email = email.trim();
+    if email.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let parts: Vec<&str> = email.split('@').collect();
     if parts.len() != 2 {
         return false;
     }
     let (local, domain) = (parts[0], parts[1]);
-    !local.is_empty()
-        && !domain.is_empty()
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
-        && domain.len() >= 3
+    if local.is_empty() || local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+        return false;
+    }
+    if domain.is_empty() || !domain.contains('.') || domain.len() < 3 {
+        return false;
+    }
+    for label in domain.split('.') {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Serialize)]

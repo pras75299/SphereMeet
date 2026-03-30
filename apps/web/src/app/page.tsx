@@ -59,6 +59,10 @@ export default function HomePage() {
       setError("Email and password are required");
       return;
     }
+    if (password.length < 1 || password.length > 128) {
+      setError("Password must be 1-128 characters");
+      return;
+    }
     if (authTab === "register" && (!displayName.trim() || displayName.trim().length > 50)) {
       setError("Display name must be 1-50 characters");
       return;
@@ -245,6 +249,7 @@ export default function HomePage() {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
                     className="pixel-input w-full px-4 py-3 text-sm"
+                    maxLength={128}
                   />
                   {authTab === "register" && (
                     <p className="pixel-mono text-xs text-[var(--outline)] mt-1 tracking-wide">

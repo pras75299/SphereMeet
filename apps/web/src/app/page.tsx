@@ -212,10 +212,11 @@ export default function HomePage() {
               <div className="space-y-4">
                 {authTab === "register" && (
                   <div>
-                    <label className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
+                    <label htmlFor="displayNameInput" className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
                       Callsign / Display Name
                     </label>
                     <input
+                      id="displayNameInput"
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
@@ -227,10 +228,11 @@ export default function HomePage() {
                 )}
 
                 <div>
-                  <label className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
+                  <label htmlFor="emailInput" className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
                     Email
                   </label>
                   <input
+                    id="emailInput"
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -240,10 +242,11 @@ export default function HomePage() {
                 </div>
 
                 <div>
-                  <label className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
+                  <label htmlFor="passwordInput" className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
                     Password
                   </label>
                   <input
+                    id="passwordInput"
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}

@@ -19,6 +19,12 @@ export default function HomePage() {
   const hydrate = useStore((state) => state.hydrate);
 
   const [authTab, setAuthTab] = useState<AuthTab>("login");
+
+  // Reset the tab to "login" whenever the user is logged out so that after
+  // a register→logout flow the form always shows the login screen.
+  useEffect(() => {
+    if (isHydrated && !token) setAuthTab("login");
+  }, [isHydrated, token]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -71,7 +77,9 @@ export default function HomePage() {
     setLoading(true);
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000);
+      // 10 s is well under the server's 5 s DB acquire_timeout + Argon2 time,
+      // so a real hang surfaces as a proper server error rather than a silent timeout.
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const endpoint = authTab === "login" ? "/api/auth/login" : "/api/auth/register";
       const body =

@@ -90,7 +90,9 @@ async fn main() {
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .acquire_timeout(Duration::from_secs(30))
+        // Keep acquire_timeout well under the frontend's 10 s abort so the server
+        // returns a proper 500 instead of silently hanging until the client gives up.
+        .acquire_timeout(Duration::from_secs(5))
         .connect(&database_url)
         .await
         .unwrap_or_else(|e| {

@@ -1,6 +1,6 @@
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
+    Argon2, Params,
 };
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
@@ -12,10 +12,19 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+/// Explicit Argon2id parameters used for all password operations.
+/// m=8192 (8 MiB), t=3, p=1 — well within OWASP interactive-login guidance and
+/// fast enough on memory-constrained dev machines so logins don't time out.
+fn argon2_params() -> Params {
+    // unwrap: these constants are always valid
+    Params::new(8192, 3, 1, None).expect("valid argon2 params")
+}
+
 /// Dummy hash used to perform a constant-time verification when a user is not
 /// found during login. This prevents timing-based email enumeration.
+/// Parameters MUST match argon2_params() so the timing is identical.
 const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    "$argon2id$v=19$m=8192,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 /// Simple RFC-5322-aware email validation (no external deps).
 fn is_valid_email(email: &str) -> bool {
@@ -118,7 +127,7 @@ pub async fn register(
 
     let password_hash = tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
-        Argon2::default()
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params())
             .hash_password(password.as_bytes(), &salt)
             .map(|h| h.to_string())
     })
@@ -179,7 +188,10 @@ pub async fn login(
 
     let verify_ok = tokio::task::spawn_blocking(move || {
         let parsed = PasswordHash::new(&stored_hash).map_err(|e| e.to_string())?;
-        Argon2::default()
+        // verify_password uses the params embedded in the PHC hash string, so
+        // the Argon2 context here only needs to be valid (params are ignored for
+        // verification).  We pass explicit params anyway for clarity.
+        Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, argon2_params())
             .verify_password(password.as_bytes(), &parsed)
             .map_err(|e| e.to_string())
     })

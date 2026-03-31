@@ -90,9 +90,10 @@ async fn main() {
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        // Keep acquire_timeout well under the frontend's 10 s abort so the server
-        // returns a proper 500 instead of silently hanging until the client gives up.
-        .acquire_timeout(Duration::from_secs(5))
+        // 15 s acquire_timeout: generous enough for remote Render Postgres to
+        // establish a fresh connection (~3-8 s), yet still under the frontend's
+        // 25 s abort so the server returns a proper 500 before the client gives up.
+        .acquire_timeout(Duration::from_secs(15))
         .connect(&database_url)
         .await
         .unwrap_or_else(|e| {

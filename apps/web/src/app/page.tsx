@@ -76,25 +76,44 @@ export default function HomePage() {
 
     setLoading(true);
     try {
-      const controller = new AbortController();
-      // 10 s is well under the server's 5 s DB acquire_timeout + Argon2 time,
-      // so a real hang surfaces as a proper server error rather than a silent timeout.
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-
       const endpoint = authTab === "login" ? "/api/auth/login" : "/api/auth/register";
       const body =
         authTab === "login"
           ? { email: email.trim(), password }
           : { email: email.trim(), password, display_name: displayName.trim() };
 
-      const res = await fetch(`${API_BASE}${endpoint}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      // Attempt the request up to 2 times to handle Render free-tier cold starts
+      // (first request wakes the dyno; second request completes normally).
+      let res: Response | null = null;
+      let lastErr: unknown = null;
 
-      clearTimeout(timeoutId);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        // 25 s per attempt — enough for Render cold start + Argon2 hashing.
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+        try {
+          res = await fetch(`${API_BASE}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          break; // success — stop retrying
+        } catch (err) {
+          clearTimeout(timeoutId);
+          lastErr = err;
+          if ((err as { name?: string }).name === "AbortError" && attempt === 0) {
+            // First attempt timed out — likely a cold start. Show hint and retry.
+            setError("Server is waking up — retrying…");
+            continue;
+          }
+          throw err; // propagate on second failure
+        }
+      }
+
+      if (!res) throw lastErr;
 
       if (res.status === 429) throw new Error("Rate limited. Please wait a moment.");
       if (res.status === 401) throw new Error("Invalid email or password.");
@@ -102,10 +121,11 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
 
+      setError("");
       setAuth(data.token, data.user);
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        setError("Request timed out — check that the API is running.");
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name === "AbortError") {
+        setError("Server did not respond. Check that the API is running.");
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong");
       }

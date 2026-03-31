@@ -19,6 +19,12 @@ export default function HomePage() {
   const hydrate = useStore((state) => state.hydrate);
 
   const [authTab, setAuthTab] = useState<AuthTab>("login");
+
+  // Reset the tab to "login" whenever the user is logged out so that after
+  // a register→logout flow the form always shows the login screen.
+  useEffect(() => {
+    if (isHydrated && !token) setAuthTab("login");
+  }, [isHydrated, token]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -26,6 +32,7 @@ export default function HomePage() {
   const [error, setError] = useState("");
 
   const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [seedingSpace, setSeedingSpace] = useState(false);
   const [seedBanner, setSeedBanner] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -36,6 +43,7 @@ export default function HomePage() {
   const fetchSpaces = useCallback(async () => {
     const currentToken = useStore.getState().token;
     if (!currentToken || typeof currentToken !== "string") return;
+    setLoadingSpaces(true);
     try {
       const res = await fetch(`${API_BASE}/api/spaces`, {
         headers: { Authorization: `Bearer ${currentToken}` },
@@ -44,6 +52,8 @@ export default function HomePage() {
       if (res.ok) setSpaces(await res.json());
     } catch (err) {
       console.error("Error fetching spaces:", err);
+    } finally {
+      setLoadingSpaces(false);
     }
   }, [clearAuth]);
 
@@ -70,23 +80,44 @@ export default function HomePage() {
 
     setLoading(true);
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000);
-
       const endpoint = authTab === "login" ? "/api/auth/login" : "/api/auth/register";
       const body =
         authTab === "login"
           ? { email: email.trim(), password }
           : { email: email.trim(), password, display_name: displayName.trim() };
 
-      const res = await fetch(`${API_BASE}${endpoint}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      // Attempt the request up to 2 times to handle Render free-tier cold starts
+      // (first request wakes the dyno; second request completes normally).
+      let res: Response | null = null;
+      let lastErr: unknown = null;
 
-      clearTimeout(timeoutId);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        // 25 s per attempt — enough for Render cold start + Argon2 hashing.
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+        try {
+          res = await fetch(`${API_BASE}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          break; // success — stop retrying
+        } catch (err) {
+          clearTimeout(timeoutId);
+          lastErr = err;
+          if ((err as { name?: string }).name === "AbortError" && attempt === 0) {
+            // First attempt timed out — likely a cold start. Show hint and retry.
+            setError("Server is waking up — retrying…");
+            continue;
+          }
+          throw err; // propagate on second failure
+        }
+      }
+
+      if (!res) throw lastErr;
 
       if (res.status === 429) throw new Error("Rate limited. Please wait a moment.");
       if (res.status === 401) throw new Error("Invalid email or password.");
@@ -94,10 +125,11 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
 
+      setError("");
       setAuth(data.token, data.user);
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        setError("Request timed out — check that the API is running.");
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name === "AbortError") {
+        setError("Server did not respond. Check that the API is running.");
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong");
       }
@@ -113,8 +145,8 @@ export default function HomePage() {
       const res = await fetch(`${API_BASE}/api/dev/seed`, { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
+        await fetchSpaces();
         setSeedBanner({ type: "ok", text: "Main Office is ready. List refreshed." });
-        fetchSpaces();
       } else {
         setSeedBanner({ type: "err", text: data.error || `Could not sync demo space (${res.status})` });
       }
@@ -415,7 +447,16 @@ export default function HomePage() {
           &gt; SELECT_SPACE — {spaces.length} AVAILABLE
         </p>
 
-        {spaces.length === 0 ? (
+        {loadingSpaces ? (
+          <div
+            className="pixel-frame text-center py-16"
+            style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}
+          >
+            <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse uppercase tracking-widest">
+              LOADING_SPACES...
+            </p>
+          </div>
+        ) : spaces.length === 0 ? (
           <div
             className="pixel-frame text-center py-16 pixel-shadow"
             style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}

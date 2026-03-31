@@ -32,6 +32,7 @@ export default function HomePage() {
   const [error, setError] = useState("");
 
   const [spaces, setSpaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [seedingSpace, setSeedingSpace] = useState(false);
   const [seedBanner, setSeedBanner] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -42,6 +43,7 @@ export default function HomePage() {
   const fetchSpaces = useCallback(async () => {
     const currentToken = useStore.getState().token;
     if (!currentToken || typeof currentToken !== "string") return;
+    setLoadingSpaces(true);
     try {
       const res = await fetch(`${API_BASE}/api/spaces`, {
         headers: { Authorization: `Bearer ${currentToken}` },
@@ -50,6 +52,8 @@ export default function HomePage() {
       if (res.ok) setSpaces(await res.json());
     } catch (err) {
       console.error("Error fetching spaces:", err);
+    } finally {
+      setLoadingSpaces(false);
     }
   }, [clearAuth]);
 
@@ -141,8 +145,8 @@ export default function HomePage() {
       const res = await fetch(`${API_BASE}/api/dev/seed`, { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
+        await fetchSpaces();
         setSeedBanner({ type: "ok", text: "Main Office is ready. List refreshed." });
-        fetchSpaces();
       } else {
         setSeedBanner({ type: "err", text: data.error || `Could not sync demo space (${res.status})` });
       }
@@ -443,7 +447,16 @@ export default function HomePage() {
           &gt; SELECT_SPACE — {spaces.length} AVAILABLE
         </p>
 
-        {spaces.length === 0 ? (
+        {loadingSpaces ? (
+          <div
+            className="pixel-frame text-center py-16"
+            style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}
+          >
+            <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse uppercase tracking-widest">
+              LOADING_SPACES...
+            </p>
+          </div>
+        ) : spaces.length === 0 ? (
           <div
             className="pixel-frame text-center py-16 pixel-shadow"
             style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}

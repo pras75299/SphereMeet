@@ -829,7 +829,7 @@ function ActivityContent() {
   const peerConnections    = useStore((s) => s.peerConnections);
   const clearPeerConnections = useStore((s) => s.clearPeerConnections);
   const setAvScope         = useStore((s) => s.setAvScope);
-  const { sendMove, sendMessage } = useWebSocketContext();
+  const { sendMove, sendMessage, isConnected } = useWebSocketContext();
 
   // Auto-focus for keyboard
   useEffect(() => { containerRef.current?.focus(); }, [map]);
@@ -886,6 +886,16 @@ function ActivityContent() {
         sendMove(cur.x, cur.y, dir); return;
       }
       sendMove(nx, ny, dir);
+      // Optimistic local update — reflect move immediately so the next keypress
+      // reads the correct position without waiting for the server echo.
+      useStore.getState().updatePresence({
+        user_id: user.id,
+        x: nx,
+        y: ny,
+        dir,
+        zone_id: cur.zone_id,
+        display_name: cur.display_name,
+      });
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -921,8 +931,11 @@ function ActivityContent() {
   if (!map) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-[var(--background)] px-4 py-8">
-        <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse tracking-widest uppercase mb-6">
+        <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse tracking-widest uppercase mb-2">
           INIT_WORLD_STATE...
+        </p>
+        <p className="pixel-mono text-xs tracking-widest uppercase mb-6" style={{ color: isConnected ? "var(--secondary)" : "var(--muted)" }}>
+          {isConnected ? "CONNECTED — AWAITING MAP DATA..." : "CONNECTING TO SERVER..."}
         </p>
         <button
           onClick={() => (window.location.href = "/")}

@@ -93,6 +93,8 @@ interface WebSocketContextValue {
   sendChat: (channel: string, body: string) => boolean;
   sendMessage: (type: string, payload: unknown) => boolean;
   isConnected: boolean;
+  /** True only after server.joined has been processed (map + presence loaded). */
+  isJoined: boolean;
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);
@@ -116,6 +118,8 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
   const isConnectingRef = useRef(false);
   /** Bumps when we need to retry after an abnormal close (effect deps). */
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
+  /** True only after server.joined has been fully processed. */
+  const [isJoined, setIsJoined] = useState(false);
   /** Queue ICE candidates until remote description is set (required for connection in many browsers) */
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   /** Offers received while A/V was disabled; process when user enables A/V */
@@ -415,6 +419,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
             if (payload.av_scopes && typeof payload.av_scopes === 'object') {
               setPeerAvScopesFromJoined(payload.av_scopes);
             }
+            setIsJoined(true);
             break;
           }
           case 'server.presence.update': {
@@ -700,6 +705,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
       console.log('[WebSocket] Closed with code:', event.code, 'reason:', event.reason);
       isConnectingRef.current = false;
       setWsConnected(false);
+      setIsJoined(false);
       setWs(null);
       
       // Only clear ref if this is still the current socket
@@ -792,6 +798,7 @@ export function WebSocketProvider({ children, spaceId }: WebSocketProviderProps)
     sendChat,
     sendMessage,
     isConnected: wsConnected,
+    isJoined,
   };
 
   return (

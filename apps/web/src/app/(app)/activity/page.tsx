@@ -829,7 +829,7 @@ function ActivityContent() {
   const peerConnections    = useStore((s) => s.peerConnections);
   const clearPeerConnections = useStore((s) => s.clearPeerConnections);
   const setAvScope         = useStore((s) => s.setAvScope);
-  const { sendMove, sendMessage, isConnected } = useWebSocketContext();
+  const { sendMove, sendMessage, isConnected, isJoined } = useWebSocketContext();
 
   // Auto-focus for keyboard
   useEffect(() => { containerRef.current?.focus(); }, [map]);
@@ -929,13 +929,18 @@ function ActivityContent() {
 
   // Loading state
   if (!map) {
+    const statusLabel = isJoined
+      ? "HANDSHAKE COMPLETE — LOADING MAP..."
+      : isConnected
+        ? "CONNECTED — AWAITING HANDSHAKE..."
+        : "CONNECTING TO SERVER...";
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-[var(--background)] px-4 py-8">
         <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse tracking-widest uppercase mb-2">
           INIT_WORLD_STATE...
         </p>
-        <p className="pixel-mono text-xs tracking-widest uppercase mb-6" style={{ color: isConnected ? "var(--secondary)" : "var(--muted)" }}>
-          {isConnected ? "CONNECTED — AWAITING MAP DATA..." : "CONNECTING TO SERVER..."}
+        <p className="pixel-mono text-xs tracking-widest uppercase mb-6" style={{ color: "var(--muted)" }}>
+          {statusLabel}
         </p>
         <button
           onClick={() => (window.location.href = "/")}

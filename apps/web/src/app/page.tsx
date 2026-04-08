@@ -6,6 +6,13 @@ import { useStore } from "@/store";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080";
 
+const MAX_USER_SPACES = 3;
+
+const DEMO_ACCOUNTS = [
+  { label: "Alice", email: "alice@spheremeet.demo", password: "demo1234" },
+  { label: "Bob",   email: "bob@spheremeet.demo",   password: "demo1234" },
+];
+
 type AuthTab = "login" | "register";
 
 export default function HomePage() {
@@ -20,11 +27,10 @@ export default function HomePage() {
 
   const [authTab, setAuthTab] = useState<AuthTab>("login");
 
-  // Reset the tab to "login" whenever the user is logged out so that after
-  // a register→logout flow the form always shows the login screen.
   useEffect(() => {
     if (isHydrated && !token) setAuthTab("login");
   }, [isHydrated, token]);
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -35,6 +41,12 @@ export default function HomePage() {
   const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [seedingSpace, setSeedingSpace] = useState(false);
   const [seedBanner, setSeedBanner] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+
+  // Create space state
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [newSpaceName, setNewSpaceName] = useState("");
+  const [creatingSpace, setCreatingSpace] = useState(false);
+  const [createError, setCreateError] = useState("");
 
   useEffect(() => {
     if (!isHydrated) hydrate();
@@ -69,8 +81,9 @@ export default function HomePage() {
       setError("Email and password are required");
       return;
     }
-    if (password.length < 1 || password.length > 128) {
-      setError("Password must be 1-128 characters");
+    const minPassword = authTab === "register" ? 8 : 1;
+    if (password.length < minPassword || password.length > 128) {
+      setError(authTab === "register" ? "Password must be 8-128 characters" : "Password must be 1-128 characters");
       return;
     }
     if (authTab === "register" && (!displayName.trim() || displayName.trim().length > 50)) {
@@ -86,16 +99,12 @@ export default function HomePage() {
           ? { email: email.trim(), password }
           : { email: email.trim(), password, display_name: displayName.trim() };
 
-      // Attempt the request up to 2 times to handle Render free-tier cold starts
-      // (first request wakes the dyno; second request completes normally).
       let res: Response | null = null;
       let lastErr: unknown = null;
 
       for (let attempt = 0; attempt < 2; attempt++) {
         const controller = new AbortController();
-        // 25 s per attempt — enough for Render cold start + Argon2 hashing.
         const timeoutId = setTimeout(() => controller.abort(), 25000);
-
         try {
           res = await fetch(`${API_BASE}${endpoint}`, {
             method: "POST",
@@ -104,16 +113,15 @@ export default function HomePage() {
             signal: controller.signal,
           });
           clearTimeout(timeoutId);
-          break; // success — stop retrying
+          break;
         } catch (err) {
           clearTimeout(timeoutId);
           lastErr = err;
           if ((err as { name?: string }).name === "AbortError" && attempt === 0) {
-            // First attempt timed out — likely a cold start. Show hint and retry.
             setError("Server is waking up — retrying…");
             continue;
           }
-          throw err; // propagate on second failure
+          throw err;
         }
       }
 
@@ -146,7 +154,7 @@ export default function HomePage() {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
         await fetchSpaces();
-        setSeedBanner({ type: "ok", text: "Main Office is ready. List refreshed." });
+        setSeedBanner({ type: "ok", text: "Main Office is ready." });
       } else {
         setSeedBanner({ type: "err", text: data.error || `Could not sync demo space (${res.status})` });
       }
@@ -157,8 +165,44 @@ export default function HomePage() {
     }
   };
 
+  const handleCreateSpace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateError("");
+    const name = newSpaceName.trim();
+    if (!name) { setCreateError("Space name is required"); return; }
+    if (name.length > 50) { setCreateError("Name must be 50 characters or fewer"); return; }
+
+    setCreatingSpace(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/spaces`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${useStore.getState().token}`,
+        },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+      setNewSpaceName("");
+      setShowCreateForm(false);
+      await fetchSpaces();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Could not create space");
+    } finally {
+      setCreatingSpace(false);
+    }
+  };
+
   const handleJoinSpace = (spaceId: string) => {
     router.push(`/activity?space=${spaceId}`);
+  };
+
+  const fillDemo = (account: typeof DEMO_ACCOUNTS[0]) => {
+    setAuthTab("login");
+    setEmail(account.email);
+    setPassword(account.password);
+    setError("");
   };
 
   if (!isHydrated) {
@@ -199,7 +243,60 @@ export default function HomePage() {
             </p>
           </div>
 
-          {/* Card — background shift + L-corner accents, no line borders */}
+          {/* Demo accounts */}
+          <div
+            className="mb-5 px-4 py-3"
+            style={{
+              background: "var(--surface-mid)",
+              boxShadow: "4px 4px 0px var(--background)",
+            }}
+          >
+            <p className="pixel-mono text-xs text-[var(--muted)] uppercase tracking-widest mb-3">
+              Demo accounts
+            </p>
+            <div className="flex flex-col gap-2">
+              {DEMO_ACCOUNTS.map((acc) => (
+                <div key={acc.email} className="flex items-center justify-between gap-3">
+                  <div>
+                    <span
+                      className="text-sm font-medium"
+                      style={{ color: "var(--foreground)", fontFamily: "'Space Grotesk', sans-serif" }}
+                    >
+                      {acc.label}
+                    </span>
+                    <span
+                      className="block text-xs mt-0.5"
+                      style={{ color: "var(--muted)", fontFamily: "'Space Grotesk', sans-serif" }}
+                    >
+                      {acc.email} · demo1234
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fillDemo(acc)}
+                    className="pixel-btn px-3 py-1 pixel-mono text-xs uppercase tracking-widest flex-shrink-0"
+                    style={{
+                      background: "var(--surface-highest)",
+                      color: "var(--secondary)",
+                      borderBottom: "3px solid var(--surface-low)",
+                    }}
+                    onMouseDown={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.transform = "translateY(2px)";
+                      (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "1px";
+                    }}
+                    onMouseUp={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.transform = "";
+                      (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "3px";
+                    }}
+                  >
+                    Use
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Auth card */}
           <div
             className="pixel-frame"
             style={{
@@ -207,7 +304,7 @@ export default function HomePage() {
               boxShadow: "4px 4px 0px var(--background)",
             }}
           >
-            {/* Tab bar — surface-low vs surface-mid colour shift is the division */}
+            {/* Tab bar */}
             <div
               style={{
                 display: "grid",
@@ -230,29 +327,34 @@ export default function HomePage() {
                     transition: "color 120ms",
                   }}
                 >
-                  {tab === "login" ? "▷ LOGIN" : "+ REGISTER"}
+                  {tab === "login" ? "▷ Login" : "+ Register"}
                 </button>
               ))}
             </div>
 
             {/* Form */}
             <form onSubmit={handleAuth} style={{ padding: "1.75rem" }}>
-              <p className="pixel-mono text-xs text-[var(--secondary)] mb-5 uppercase tracking-widest">
-                &gt; {authTab === "login" ? "AUTHENTICATE_OPERATOR" : "ENROLL_NEW_OPERATOR"}
+              <p
+                className="text-sm mb-5"
+                style={{ color: "var(--foreground)", fontFamily: "'Space Grotesk', sans-serif", lineHeight: 1.5 }}
+              >
+                {authTab === "login"
+                  ? "Sign in to your account"
+                  : "Create a new account"}
               </p>
 
               <div className="space-y-4">
                 {authTab === "register" && (
                   <div>
                     <label htmlFor="displayNameInput" className="block pixel-mono text-xs text-[var(--muted)] mb-2 uppercase tracking-wider">
-                      Callsign / Display Name
+                      Display Name
                     </label>
                     <input
                       id="displayNameInput"
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Enter callsign..."
+                      placeholder="Your name"
                       className="pixel-input w-full px-4 py-3 text-sm"
                       maxLength={50}
                     />
@@ -268,7 +370,7 @@ export default function HomePage() {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="operator@domain.io"
+                    placeholder="you@example.com"
                     className="pixel-input w-full px-4 py-3 text-sm"
                   />
                 </div>
@@ -287,8 +389,8 @@ export default function HomePage() {
                     maxLength={128}
                   />
                   {authTab === "register" && (
-                    <p className="pixel-mono text-xs text-[var(--outline)] mt-1 tracking-wide">
-                      MIN 8 CHARS
+                    <p className="text-xs mt-1" style={{ color: "var(--outline)", fontFamily: "'Space Grotesk', sans-serif" }}>
+                      At least 8 characters
                     </p>
                   )}
                 </div>
@@ -296,14 +398,16 @@ export default function HomePage() {
 
               {error && (
                 <div
-                  className="mt-4 px-3 py-2 pixel-mono text-xs tracking-wide"
+                  className="mt-4 px-3 py-2 text-sm"
                   style={{
                     background: "rgba(239,68,68,0.10)",
                     outline: "1px solid rgba(239,68,68,0.35)",
                     color: "#fca5a5",
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    lineHeight: 1.5,
                   }}
                 >
-                  ⚠ {error}
+                  {error}
                 </div>
               )}
 
@@ -332,13 +436,16 @@ export default function HomePage() {
                 }}
               >
                 {loading
-                  ? "CONNECTING..."
+                  ? "Connecting..."
                   : authTab === "login"
-                  ? "▶ AUTHENTICATE"
-                  : "▶ ENROLL"}
+                  ? "▶ Sign In"
+                  : "▶ Create Account"}
               </button>
 
-              <p className="text-center pixel-mono text-xs text-[var(--outline)] mt-4 tracking-widest uppercase">
+              <p
+                className="text-center text-xs mt-4"
+                style={{ color: "var(--outline)", fontFamily: "'Space Grotesk', sans-serif" }}
+              >
                 {authTab === "login" ? (
                   <>
                     No account?{" "}
@@ -347,18 +454,18 @@ export default function HomePage() {
                       onClick={() => { setAuthTab("register"); setError(""); }}
                       className="text-[var(--secondary)] underline-offset-2 underline cursor-pointer"
                     >
-                      REGISTER
+                      Register
                     </button>
                   </>
                 ) : (
                   <>
-                    Have an account?{" "}
+                    Already have an account?{" "}
                     <button
                       type="button"
                       onClick={() => { setAuthTab("login"); setError(""); }}
                       className="text-[var(--secondary)] underline-offset-2 underline cursor-pointer"
                     >
-                      LOGIN
+                      Sign in
                     </button>
                   </>
                 )}
@@ -366,8 +473,8 @@ export default function HomePage() {
             </form>
           </div>
 
-          <p className="text-center pixel-mono text-xs text-[var(--outline)] mt-4 tracking-widest uppercase">
-            Proximity audio/video enabled
+          <p className="text-center text-xs text-[var(--outline)] mt-4" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+            Proximity audio & video enabled
           </p>
         </div>
       </div>
@@ -378,6 +485,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-[var(--background)] p-6">
       <div className="max-w-4xl mx-auto">
+        {/* Header */}
         <div className="flex items-center justify-between mb-8 pb-4" style={{ borderBottom: "2px solid var(--outline-dim)" }}>
           <div className="flex items-center gap-3">
             <span className="pixel-badge-on" />
@@ -386,9 +494,6 @@ export default function HomePage() {
               style={{ fontFamily: "'Share Tech Mono', monospace", color: "var(--primary-lit)" }}
             >
               SPHEREMEET
-            </span>
-            <span className="pixel-mono text-xs text-[var(--muted)] ml-2">
-              / SPACE_BROWSER
             </span>
           </div>
           <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-3">
@@ -411,7 +516,7 @@ export default function HomePage() {
                 borderBottom: "4px solid var(--surface-low)",
               }}
             >
-              {seedingSpace ? "SYNCING..." : "ENSURE MAIN OFFICE"}
+              {seedingSpace ? "Syncing..." : "Sync Demo Space"}
             </button>
             <button
               type="button"
@@ -424,46 +529,133 @@ export default function HomePage() {
                 borderBottom: "4px solid rgba(239,68,68,0.3)",
               }}
             >
-              LOGOUT
+              Sign Out
             </button>
           </div>
         </div>
 
         {seedBanner && (
           <div
-            className="mb-4 pixel-frame px-4 py-2 pixel-mono text-xs uppercase tracking-wider"
+            className="mb-4 px-4 py-2 text-sm"
             style={{
               background: seedBanner.type === "ok" ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
-              borderColor: seedBanner.type === "ok" ? "#22c55e" : "#ef4444",
+              outline: `1px solid ${seedBanner.type === "ok" ? "#22c55e" : "#ef4444"}`,
               color: seedBanner.type === "ok" ? "#86efac" : "#fca5a5",
+              fontFamily: "'Space Grotesk', sans-serif",
             }}
           >
-            {seedBanner.type === "ok" ? "OK — " : "ERR — "}
             {seedBanner.text}
           </div>
         )}
 
-        <p className="pixel-mono text-xs text-[var(--muted)] uppercase tracking-widest mb-4">
-          &gt; SELECT_SPACE — {spaces.length} AVAILABLE
-        </p>
+        {/* Spaces heading + create button */}
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2
+              className="text-base font-semibold"
+              style={{ color: "var(--foreground)", fontFamily: "'Space Grotesk', sans-serif" }}
+            >
+              Spaces
+            </h2>
+            <p className="text-xs mt-0.5" style={{ color: "var(--muted)", fontFamily: "'Space Grotesk', sans-serif" }}>
+              {spaces.length} available · You can create up to {MAX_USER_SPACES}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setShowCreateForm((v) => !v); setCreateError(""); setNewSpaceName(""); }}
+            className="pixel-btn px-4 py-2 pixel-mono text-xs uppercase tracking-widest"
+            style={{
+              background: showCreateForm ? "var(--surface-highest)" : "var(--primary)",
+              color: showCreateForm ? "var(--foreground)" : "#fff",
+              borderBottom: `4px solid ${showCreateForm ? "var(--surface-low)" : "#312e81"}`,
+            }}
+            onMouseDown={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.transform = "translateY(2px)";
+              (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "2px";
+            }}
+            onMouseUp={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.transform = "";
+              (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "4px";
+            }}
+          >
+            {showCreateForm ? "✕ Cancel" : "+ New Space"}
+          </button>
+        </div>
 
+        {/* Create space inline form */}
+        {showCreateForm && (
+          <form
+            onSubmit={handleCreateSpace}
+            className="mb-5 px-4 py-4"
+            style={{ background: "var(--surface-mid)", boxShadow: "4px 4px 0px var(--background)" }}
+          >
+            <p className="pixel-mono text-xs text-[var(--muted)] uppercase tracking-widest mb-3">
+              New space
+            </p>
+            <div className="flex gap-3 items-start">
+              <div className="flex-1">
+                <input
+                  type="text"
+                  value={newSpaceName}
+                  onChange={(e) => setNewSpaceName(e.target.value)}
+                  placeholder="Space name"
+                  className="pixel-input w-full px-4 py-3 text-sm"
+                  maxLength={50}
+                  autoFocus
+                />
+                {createError && (
+                  <p className="text-xs mt-1" style={{ color: "#fca5a5", fontFamily: "'Space Grotesk', sans-serif" }}>
+                    {createError}
+                  </p>
+                )}
+              </div>
+              <button
+                type="submit"
+                disabled={creatingSpace}
+                className="pixel-btn px-4 py-3 pixel-mono text-xs uppercase tracking-widest disabled:opacity-50 flex-shrink-0"
+                style={{
+                  background: "var(--primary)",
+                  color: "#fff",
+                  borderBottom: "4px solid #312e81",
+                }}
+                onMouseDown={(e) => {
+                  if (!creatingSpace) {
+                    (e.currentTarget as HTMLButtonElement).style.transform = "translateY(2px)";
+                    (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "2px";
+                  }
+                }}
+                onMouseUp={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.transform = "";
+                  (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "4px";
+                }}
+              >
+                {creatingSpace ? "Creating..." : "Create"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Spaces list */}
         {loadingSpaces ? (
           <div
             className="pixel-frame text-center py-16"
-            style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}
+            style={{ background: "var(--surface-mid)" }}
           >
-            <p className="pixel-mono text-sm text-[var(--secondary)] animate-pulse uppercase tracking-widest">
-              LOADING_SPACES...
+            <p className="text-sm animate-pulse" style={{ color: "var(--secondary)", fontFamily: "'Space Grotesk', sans-serif" }}>
+              Loading spaces...
             </p>
           </div>
         ) : spaces.length === 0 ? (
           <div
             className="pixel-frame text-center py-16 pixel-shadow"
-            style={{ background: "var(--surface-mid)", border: "1px solid var(--outline-dim)" }}
+            style={{ background: "var(--surface-mid)" }}
           >
-            <p className="pixel-mono text-sm text-[var(--muted)] mb-2">NO_SPACES_FOUND</p>
-            <p className="pixel-mono text-xs text-[var(--outline)] uppercase tracking-widest">
-              Main Office is created when the server starts — use &quot;ENSURE MAIN OFFICE&quot; to refresh the list
+            <p className="text-sm mb-2" style={{ color: "var(--muted)", fontFamily: "'Space Grotesk', sans-serif" }}>
+              No spaces found
+            </p>
+            <p className="text-xs" style={{ color: "var(--outline)", fontFamily: "'Space Grotesk', sans-serif" }}>
+              Use &quot;Sync Demo Space&quot; to create the default office, or create your own above.
             </p>
           </div>
         ) : (
@@ -514,13 +706,13 @@ export default function HomePage() {
                 <div className="flex items-center justify-between">
                   <div>
                     <h3
-                      className="font-semibold tracking-wide uppercase"
-                      style={{ fontFamily: "'Share Tech Mono', monospace", color: "var(--secondary-lit)", fontSize: "0.85rem" }}
+                      className="font-semibold"
+                      style={{ fontFamily: "'Share Tech Mono', monospace", color: "var(--secondary-lit)", fontSize: "0.9rem" }}
                     >
                       {space.name}
                     </h3>
-                    <p className="pixel-mono text-xs text-[var(--muted)] mt-1 uppercase tracking-widest">
-                      Click to join floor
+                    <p className="text-xs mt-1" style={{ color: "var(--muted)", fontFamily: "'Space Grotesk', sans-serif" }}>
+                      Click to enter
                     </p>
                   </div>
                   <span

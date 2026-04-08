@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -42,6 +42,35 @@ pub struct SpaceDetailResponse {
     pub space: SpaceListItem,
     pub map: Option<MapResponse>,
     pub zones: Vec<ZoneResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSpaceRequest {
+    pub name: String,
+}
+
+pub async fn create_space(
+    auth: AuthUser,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateSpaceRequest>,
+) -> AppResult<Json<SpaceListItem>> {
+    let name = payload.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 50 {
+        return Err(AppError::BadRequest(
+            "Space name must be 1-50 characters".to_string(),
+        ));
+    }
+
+    let count = db::count_spaces_by_owner(&state.pool, auth.user_id).await?;
+    if count >= db::MAX_USER_SPACES {
+        return Err(AppError::BadRequest(format!(
+            "You can create at most {} spaces",
+            db::MAX_USER_SPACES
+        )));
+    }
+
+    let space = db::create_owned_space(&state.pool, &name, auth.user_id).await?;
+    Ok(Json(SpaceListItem { id: space.id, name: space.name }))
 }
 
 pub async fn list_spaces(

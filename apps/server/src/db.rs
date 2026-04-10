@@ -5,7 +5,7 @@ use argon2::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -258,19 +258,38 @@ pub async fn list_spaces(pool: &PgPool) -> AppResult<Vec<Space>> {
     Ok(spaces)
 }
 
-/// Count spaces owned by a specific user (excludes system spaces with no owner).
-pub async fn count_spaces_by_owner(pool: &PgPool, owner_id: Uuid) -> AppResult<i64> {
+/// Create a space owned by a user. The new space gets a default 15×10 floor layout.
+///
+/// Quota is enforced inside a transaction: the owner row is locked with `FOR UPDATE` so
+/// concurrent creates cannot exceed [`MAX_USER_SPACES`].
+pub async fn create_owned_space(pool: &PgPool, name: &str, owner_id: Uuid) -> AppResult<Space> {
+    let mut tx = pool.begin().await?;
+
+    let user_ok = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if user_ok.is_none() {
+        return Err(AppError::NotFound("User not found".to_string()));
+    }
+
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM spaces WHERE owner_id = $1",
     )
     .bind(owner_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(count)
-}
 
-/// Create a space owned by a user. The new space gets a default 15×10 floor layout.
-pub async fn create_owned_space(pool: &PgPool, name: &str, owner_id: Uuid) -> AppResult<Space> {
+    if count >= MAX_USER_SPACES {
+        return Err(AppError::BadRequest(format!(
+            "You can create at most {} spaces",
+            MAX_USER_SPACES
+        )));
+    }
+
     let id = Uuid::new_v4();
     let space = sqlx::query_as::<_, Space>(
         r#"
@@ -282,14 +301,19 @@ pub async fn create_owned_space(pool: &PgPool, name: &str, owner_id: Uuid) -> Ap
     .bind(id)
     .bind(name)
     .bind(owner_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    create_default_floor(pool, space.id).await?;
+    create_default_floor(&mut *tx, space.id).await?;
+
+    tx.commit().await?;
     Ok(space)
 }
 
-async fn create_default_floor(pool: &PgPool, space_id: Uuid) -> AppResult<()> {
+async fn create_default_floor<'e, E>(executor: E, space_id: Uuid) -> AppResult<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     const WIDTH: i32 = 15;
     const HEIGHT: i32 = 10;
     let tiles: Vec<i32> = vec![1; (WIDTH * HEIGHT) as usize];
@@ -301,7 +325,16 @@ async fn create_default_floor(pool: &PgPool, space_id: Uuid) -> AppResult<()> {
             }
         }
     }
-    create_map(pool, space_id, Some("Floor"), WIDTH, HEIGHT, json!(tiles), json!(blocked)).await?;
+    create_map(
+        executor,
+        space_id,
+        Some("Floor"),
+        WIDTH,
+        HEIGHT,
+        json!(tiles),
+        json!(blocked),
+    )
+    .await?;
     Ok(())
 }
 
@@ -356,15 +389,18 @@ pub async fn get_map_for_space(pool: &PgPool, space_id: Uuid) -> AppResult<Optio
     Ok(map)
 }
 
-pub async fn create_map(
-    pool: &PgPool,
+pub async fn create_map<'e, E>(
+    executor: E,
     space_id: Uuid,
     name: Option<&str>,
     width: i32,
     height: i32,
     tiles: serde_json::Value,
     blocked: serde_json::Value,
-) -> AppResult<Map> {
+) -> AppResult<Map>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let id = Uuid::new_v4();
     let map = sqlx::query_as::<_, Map>(
         r#"
@@ -380,7 +416,7 @@ pub async fn create_map(
     .bind(height)
     .bind(tiles)
     .bind(blocked)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(map)
@@ -451,8 +487,13 @@ pub async fn ensure_demo_users(pool: &PgPool) -> AppResult<()> {
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        create_registered_user(pool, email, display_name, &hash).await.ok();
-        tracing::info!("Demo user seeded: {}", email);
+        match create_registered_user(pool, email, display_name, &hash).await {
+            Ok(_) => tracing::info!("Demo user seeded: {}", email),
+            Err(e) => {
+                tracing::warn!("Failed to seed demo user {}: {:?}", email, e);
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }

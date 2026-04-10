@@ -182,6 +182,10 @@ export default function HomePage() {
         },
         body: JSON.stringify({ name }),
       });
+      if (res.status === 401) {
+        clearAuth();
+        return;
+      }
       const data = await res.json().catch(() => ({})) as { error?: string };
       if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
       setNewSpaceName("");

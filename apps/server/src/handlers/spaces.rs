@@ -61,14 +61,6 @@ pub async fn create_space(
         ));
     }
 
-    let count = db::count_spaces_by_owner(&state.pool, auth.user_id).await?;
-    if count >= db::MAX_USER_SPACES {
-        return Err(AppError::BadRequest(format!(
-            "You can create at most {} spaces",
-            db::MAX_USER_SPACES
-        )));
-    }
-
     let space = db::create_owned_space(&state.pool, &name, auth.user_id).await?;
     Ok(Json(SpaceListItem { id: space.id, name: space.name }))
 }

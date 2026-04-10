@@ -113,6 +113,11 @@ async fn main() {
         Err(e) => tracing::warn!("Could not ensure Main Office (non-fatal, spaces still listable): {:?}", e),
     }
 
+    match db::ensure_demo_users(&pool).await {
+        Ok(()) => tracing::info!("Demo users ready"),
+        Err(e) => tracing::warn!("Could not seed demo users (non-fatal): {:?}", e),
+    }
+
     let state = Arc::new(AppState::new(pool));
 
     let cors_origin = std::env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string());
@@ -149,7 +154,7 @@ async fn main() {
         .route("/auth/login", post(handlers::auth::login))
         .route("/auth/guest", post(handlers::auth::create_guest))
         .route("/dev/seed", post(handlers::dev::seed))
-        .route("/spaces", get(handlers::spaces::list_spaces))
+        .route("/spaces", get(handlers::spaces::list_spaces).post(handlers::spaces::create_space))
         .route("/spaces/:id", get(handlers::spaces::get_space))
         .route("/chat/:space_id", get(handlers::chat::get_messages))
         .layer(governor_layer);

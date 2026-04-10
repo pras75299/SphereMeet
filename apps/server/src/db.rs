@@ -1,10 +1,17 @@
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2, Params,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+
+/// Maximum spaces a single user may create.
+pub const MAX_USER_SPACES: i64 = 3;
 
 /// Default demo space; created at server startup (idempotent).
 pub const MAIN_OFFICE_NAME: &str = "Main Office";
@@ -136,6 +143,34 @@ pub async fn run_migrations(pool: &PgPool) -> AppResult<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"
     ).execute(pool).await?;
 
+    // Space ownership migration (idempotent)
+    sqlx::query(
+        "ALTER TABLE spaces ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id)"
+    ).execute(pool).await?;
+
+    // Deduplicate system spaces (owner_id IS NULL) that share the same name.
+    // Keeps the entry that already has a map; if none do, keeps the newest.
+    // Cascade delete removes associated maps/zones automatically.
+    sqlx::query(
+        r#"
+        DELETE FROM spaces
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY name
+                           ORDER BY
+                               (SELECT COUNT(*) FROM maps WHERE maps.space_id = spaces.id) DESC,
+                               created_at DESC
+                       ) AS rn
+                FROM spaces
+                WHERE owner_id IS NULL
+            ) ranked
+            WHERE rn > 1
+        )
+        "#,
+    ).execute(pool).await?;
+
     Ok(())
 }
 
@@ -212,22 +247,95 @@ pub async fn get_user_by_email(pool: &PgPool, email: &str) -> AppResult<Option<U
 }
 
 // Space operations
-/// List spaces, one per name (keeps most recent if duplicates exist e.g. multiple "Main Office").
+/// List all spaces ordered by creation date (newest first).
 pub async fn list_spaces(pool: &PgPool) -> AppResult<Vec<Space>> {
     let spaces = sqlx::query_as::<_, Space>(
-        r#"
-        SELECT id, name, created_at FROM (
-            SELECT DISTINCT ON (name) id, name, created_at
-            FROM spaces
-            ORDER BY name, created_at DESC
-        ) AS deduped
-        ORDER BY created_at DESC
-        "#,
+        "SELECT id, name, created_at FROM spaces ORDER BY created_at DESC",
     )
     .fetch_all(pool)
     .await?;
 
     Ok(spaces)
+}
+
+/// Create a space owned by a user. The new space gets a default 15×10 floor layout.
+///
+/// Quota is enforced inside a transaction: the owner row is locked with `FOR UPDATE` so
+/// concurrent creates cannot exceed [`MAX_USER_SPACES`].
+pub async fn create_owned_space(pool: &PgPool, name: &str, owner_id: Uuid) -> AppResult<Space> {
+    let mut tx = pool.begin().await?;
+
+    let user_ok = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if user_ok.is_none() {
+        return Err(AppError::NotFound("User not found".to_string()));
+    }
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM spaces WHERE owner_id = $1",
+    )
+    .bind(owner_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if count >= MAX_USER_SPACES {
+        return Err(AppError::BadRequest(format!(
+            "You can create at most {} spaces",
+            MAX_USER_SPACES
+        )));
+    }
+
+    let id = Uuid::new_v4();
+    let space = sqlx::query_as::<_, Space>(
+        r#"
+        INSERT INTO spaces (id, name, owner_id)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(owner_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    create_default_floor(&mut *tx, space.id).await?;
+
+    tx.commit().await?;
+    Ok(space)
+}
+
+async fn create_default_floor<'e, E>(executor: E, space_id: Uuid) -> AppResult<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    const WIDTH: i32 = 15;
+    const HEIGHT: i32 = 10;
+    let tiles: Vec<i32> = vec![1; (WIDTH * HEIGHT) as usize];
+    let mut blocked: Vec<i32> = Vec::new();
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            if x == 0 || x == WIDTH - 1 || y == 0 || y == HEIGHT - 1 {
+                blocked.push(y * WIDTH + x);
+            }
+        }
+    }
+    create_map(
+        executor,
+        space_id,
+        Some("Floor"),
+        WIDTH,
+        HEIGHT,
+        json!(tiles),
+        json!(blocked),
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn get_space(pool: &PgPool, id: Uuid) -> AppResult<Option<Space>> {
@@ -281,15 +389,18 @@ pub async fn get_map_for_space(pool: &PgPool, space_id: Uuid) -> AppResult<Optio
     Ok(map)
 }
 
-pub async fn create_map(
-    pool: &PgPool,
+pub async fn create_map<'e, E>(
+    executor: E,
     space_id: Uuid,
     name: Option<&str>,
     width: i32,
     height: i32,
     tiles: serde_json::Value,
     blocked: serde_json::Value,
-) -> AppResult<Map> {
+) -> AppResult<Map>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let id = Uuid::new_v4();
     let map = sqlx::query_as::<_, Map>(
         r#"
@@ -305,7 +416,7 @@ pub async fn create_map(
     .bind(height)
     .bind(tiles)
     .bind(blocked)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(map)
@@ -351,6 +462,40 @@ pub async fn create_zone(
     .await?;
 
     Ok(zone)
+}
+
+/// Seed two demo accounts (idempotent — skips if email already exists).
+/// Credentials: alice@spheremeet.demo / demo1234  and  bob@spheremeet.demo / demo1234
+pub async fn ensure_demo_users(pool: &PgPool) -> AppResult<()> {
+    let demo_accounts = [
+        ("alice@spheremeet.demo", "Alice"),
+        ("bob@spheremeet.demo", "Bob"),
+    ];
+    for (email, display_name) in demo_accounts {
+        if get_user_by_email(pool, email).await?.is_some() {
+            continue;
+        }
+        let pwd = "demo1234".to_string();
+        let hash = tokio::task::spawn_blocking(move || {
+            let params = Params::new(8192, 3, 1, None).expect("valid argon2 params");
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+                .hash_password(pwd.as_bytes(), &salt)
+                .map(|h| h.to_string())
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        match create_registered_user(pool, email, display_name, &hash).await {
+            Ok(_) => tracing::info!("Demo user seeded: {}", email),
+            Err(e) => {
+                tracing::warn!("Failed to seed demo user {}: {:?}", email, e);
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Ensure Main Office exists with the standard floor map and zones. Idempotent.

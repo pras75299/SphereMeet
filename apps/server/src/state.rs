@@ -30,6 +30,8 @@ const GRID_CELL_SIZE: i32 = 5;
 pub struct UserPresence {
     pub user_id: Uuid,
     pub display_name: String,
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
     pub x: i32,
     pub y: i32,
     pub dir: String,
@@ -205,6 +207,8 @@ impl AppState {
         space_id: Uuid,
         user_id: Uuid,
         display_name: String,
+        avatar_color: Option<String>,
+        avatar_emoji: Option<String>,
         sender: mpsc::Sender<String>,
     ) {
         let space_arc = self.spaces.entry(space_id).or_insert_with(|| Arc::new(RwLock::new(SpaceState::new()))).clone();
@@ -228,6 +232,8 @@ impl AppState {
             UserPresence {
                 user_id,
                 display_name,
+                avatar_color,
+                avatar_emoji,
                 x: init_x,
                 y: init_y,
                 dir: "down".to_string(),

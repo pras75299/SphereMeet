@@ -49,17 +49,28 @@ static JWT_SECRET: Lazy<String> = Lazy::new(|| {
 pub struct Claims {
     pub sub: Uuid,
     pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_emoji: Option<String>,
     pub exp: i64,
     pub iat: i64,
 }
 
-pub fn create_token(user_id: Uuid, display_name: &str) -> AppResult<String> {
+pub fn create_token(
+    user_id: Uuid,
+    display_name: &str,
+    avatar_color: Option<&str>,
+    avatar_emoji: Option<&str>,
+) -> AppResult<String> {
     let now = Utc::now();
     let exp = now + Duration::days(7);
 
     let claims = Claims {
         sub: user_id,
         display_name: display_name.to_string(),
+        avatar_color: avatar_color.map(|s| s.to_string()),
+        avatar_emoji: avatar_emoji.map(|s| s.to_string()),
         exp: exp.timestamp(),
         iat: now.timestamp(),
     };

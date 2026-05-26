@@ -44,3 +44,12 @@ implementation_plan.md
 CLAUDE.md
 APPLICATION_TRACKER.md
 1.avif
+
+# Planning & internal docs (local only, not for repo)
+ROADMAP.md
+PLANNING.md
+FEATURE_NOTES.md
+SPRINT_*.md
+TODO.md
+*.local.ts
+*.local.tsx

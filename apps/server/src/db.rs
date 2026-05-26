@@ -20,6 +20,8 @@ pub const MAIN_OFFICE_NAME: &str = "Main Office";
 pub struct User {
     pub id: Uuid,
     pub display_name: String,
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -148,6 +150,14 @@ pub async fn run_migrations(pool: &PgPool) -> AppResult<()> {
         "ALTER TABLE spaces ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id)"
     ).execute(pool).await?;
 
+    // Avatar customization migration (idempotent)
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_color TEXT"
+    ).execute(pool).await?;
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_emoji TEXT"
+    ).execute(pool).await?;
+
     // Deduplicate system spaces (owner_id IS NULL) that share the same name.
     // Keeps the entry that already has a map; if none do, keeps the newest.
     // Cascade delete removes associated maps/zones automatically.
@@ -181,7 +191,7 @@ pub async fn create_user(pool: &PgPool, display_name: &str) -> AppResult<User> {
         r#"
         INSERT INTO users (id, display_name)
         VALUES ($1, $2)
-        RETURNING id, display_name, created_at
+        RETURNING id, display_name, avatar_color, avatar_emoji, created_at
         "#,
     )
     .bind(id)
@@ -194,10 +204,33 @@ pub async fn create_user(pool: &PgPool, display_name: &str) -> AppResult<User> {
 
 pub async fn get_user(pool: &PgPool, id: Uuid) -> AppResult<Option<User>> {
     let user = sqlx::query_as::<_, User>(
-        "SELECT id, display_name, created_at FROM users WHERE id = $1",
+        "SELECT id, display_name, avatar_color, avatar_emoji, created_at FROM users WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+pub async fn update_user_avatar(
+    pool: &PgPool,
+    user_id: Uuid,
+    avatar_color: Option<&str>,
+    avatar_emoji: Option<&str>,
+) -> AppResult<User> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET avatar_color = $2, avatar_emoji = $3
+        WHERE id = $1
+        RETURNING id, display_name, avatar_color, avatar_emoji, created_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(avatar_color)
+    .bind(avatar_emoji)
+    .fetch_one(pool)
     .await?;
 
     Ok(user)
@@ -209,6 +242,8 @@ pub struct UserWithCredentials {
     pub id: Uuid,
     pub display_name: String,
     pub password_hash: Option<String>,
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
 }
 
 pub async fn create_registered_user(
@@ -222,7 +257,7 @@ pub async fn create_registered_user(
         r#"
         INSERT INTO users (id, display_name, email, password_hash)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, display_name, created_at
+        RETURNING id, display_name, avatar_color, avatar_emoji, created_at
         "#,
     )
     .bind(id)
@@ -237,7 +272,7 @@ pub async fn create_registered_user(
 
 pub async fn get_user_by_email(pool: &PgPool, email: &str) -> AppResult<Option<UserWithCredentials>> {
     let user = sqlx::query_as::<_, UserWithCredentials>(
-        "SELECT id, display_name, password_hash FROM users WHERE email = $1",
+        "SELECT id, display_name, password_hash, avatar_color, avatar_emoji FROM users WHERE email = $1",
     )
     .bind(email)
     .fetch_optional(pool)

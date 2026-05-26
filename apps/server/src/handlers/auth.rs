@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::create_token;
+use crate::auth::{create_token, AuthUser};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -59,6 +59,8 @@ fn is_valid_email(email: &str) -> bool {
 pub struct UserResponse {
     pub id: Uuid,
     pub display_name: String,
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,11 +88,16 @@ pub async fn create_guest(
     }
 
     let user = db::create_user(&state.pool, display_name).await?;
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 
@@ -149,11 +156,16 @@ pub async fn register(
         Err(e) => return Err(e),
     };
 
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 
@@ -205,11 +217,98 @@ pub async fn login(
     }
 
     let user = user_creds.unwrap();
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
+    }))
+}
+
+// ── Update Profile ────────────────────────────────────────────────────────────
+
+// True PATCH semantics: omitted field = preserve, null/empty = clear, value = set.
+// Double-Option lets us distinguish "field absent" (None) from "field explicitly null" (Some(None)).
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchMeRequest {
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub avatar_color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub avatar_emoji: Option<Option<String>>,
+}
+
+pub async fn patch_me(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Json(payload): Json<PatchMeRequest>,
+) -> AppResult<Json<AuthResponse>> {
+    let current = db::get_user(&state.pool, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    // Validate color: must be #rrggbb hex; null/empty clears; field absent preserves.
+    let avatar_color: Option<String> = match payload.avatar_color {
+        None => current.avatar_color,
+        Some(None) => None,
+        Some(Some(c)) if c.is_empty() => None,
+        Some(Some(c)) => {
+            let c = c.trim();
+            if c.len() != 7 || !c.starts_with('#') || !c[1..].chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(AppError::BadRequest("avatar_color must be a #rrggbb hex string".to_string()));
+            }
+            Some(c.to_lowercase())
+        }
+    };
+
+    // Validate emoji: max 8 chars; null/empty clears; field absent preserves.
+    let avatar_emoji: Option<String> = match payload.avatar_emoji {
+        None => current.avatar_emoji,
+        Some(None) => None,
+        Some(Some(e)) if e.is_empty() => None,
+        Some(Some(e)) => {
+            if e.chars().count() > 8 {
+                return Err(AppError::BadRequest("avatar_emoji must be 8 characters or fewer".to_string()));
+            }
+            Some(e)
+        }
+    };
+
+    let user = db::update_user_avatar(
+        &state.pool,
+        auth_user.user_id,
+        avatar_color.as_deref(),
+        avatar_emoji.as_deref(),
+    )
+    .await?;
+
+    let token = create_token(
+        user.id,
+        &user.display_name,
+        user.avatar_color.as_deref(),
+        user.avatar_emoji.as_deref(),
+    )?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 

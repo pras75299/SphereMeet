@@ -43,6 +43,8 @@ const removeStorageItem = (key: string): void => {
 export interface User {
   id: string;
   display_name: string;
+  avatar_color?: string | null;
+  avatar_emoji?: string | null;
 }
 
 export interface MapData {
@@ -65,6 +67,8 @@ export interface Zone {
 export interface UserPresence {
   user_id: string;
   display_name: string;
+  avatar_color?: string | null;
+  avatar_emoji?: string | null;
   x: number;
   y: number;
   dir: 'up' | 'down' | 'left' | 'right';
@@ -97,6 +101,7 @@ interface AppState {
   token: string | null;
   user: User | null;
   setAuth: (token: string, user: User) => void;
+  updateUser: (token: string, user: User) => void;
   clearAuth: () => void;
 
   // Space
@@ -115,6 +120,8 @@ interface AppState {
   updatePresence: (
     presence: Pick<UserPresence, 'user_id' | 'x' | 'y' | 'dir' | 'zone_id'> & {
       display_name?: string;
+      avatar_color?: string | null;
+      avatar_emoji?: string | null;
     },
   ) => void;
   removePresence: (userId: string) => void;
@@ -186,6 +193,12 @@ export const useStore = create<AppState>((set, get) => ({
     setStorageItem('user', JSON.stringify(normalized));
     set({ token, user: normalized });
   },
+  updateUser: (token, user) => {
+    const normalized = { ...user, id: canonicalUserId(user.id) };
+    setStorageItem('token', token);
+    setStorageItem('user', JSON.stringify(normalized));
+    set({ token, user: normalized });
+  },
   clearAuth: () => {
     const s = get();
     try {
@@ -244,6 +257,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...p,
         user_id: id,
         display_name: dn && dn.length > 0 ? dn : 'Unknown',
+        avatar_color: p.avatar_color ?? null,
+        avatar_emoji: p.avatar_emoji ?? null,
       });
     });
     set((state) => {
@@ -272,6 +287,8 @@ export const useStore = create<AppState>((set, get) => ({
         dir: presence.dir,
         zone_id: presence.zone_id,
         display_name: displayName,
+        avatar_color: presence.avatar_color !== undefined ? presence.avatar_color : (existing?.avatar_color ?? null),
+        avatar_emoji: presence.avatar_emoji !== undefined ? presence.avatar_emoji : (existing?.avatar_emoji ?? null),
       });
       return { presence: newPresence };
     });

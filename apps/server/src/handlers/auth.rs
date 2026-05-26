@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::create_token;
+use crate::auth::{create_token, AuthUser};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -59,6 +59,8 @@ fn is_valid_email(email: &str) -> bool {
 pub struct UserResponse {
     pub id: Uuid,
     pub display_name: String,
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,11 +88,16 @@ pub async fn create_guest(
     }
 
     let user = db::create_user(&state.pool, display_name).await?;
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 
@@ -149,11 +156,16 @@ pub async fn register(
         Err(e) => return Err(e),
     };
 
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 
@@ -205,11 +217,78 @@ pub async fn login(
     }
 
     let user = user_creds.unwrap();
-    let token = create_token(user.id, &user.display_name)?;
+    let token = create_token(user.id, &user.display_name, user.avatar_color.as_deref(), user.avatar_emoji.as_deref())?;
 
     Ok(Json(AuthResponse {
         token,
-        user: UserResponse { id: user.id, display_name: user.display_name },
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
+    }))
+}
+
+// ── Update Profile ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PatchMeRequest {
+    pub avatar_color: Option<String>,
+    pub avatar_emoji: Option<String>,
+}
+
+pub async fn patch_me(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Json(payload): Json<PatchMeRequest>,
+) -> AppResult<Json<AuthResponse>> {
+    // Validate color: must be #rrggbb hex or null/empty to clear
+    let avatar_color: Option<String> = match &payload.avatar_color {
+        Some(c) if !c.is_empty() => {
+            let c = c.trim();
+            if c.len() != 7 || !c.starts_with('#') || !c[1..].chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(AppError::BadRequest("avatar_color must be a #rrggbb hex string".to_string()));
+            }
+            Some(c.to_lowercase())
+        }
+        _ => None,
+    };
+
+    // Validate emoji: max 8 chars (covers multi-byte emoji)
+    let avatar_emoji: Option<String> = match &payload.avatar_emoji {
+        Some(e) if !e.is_empty() => {
+            if e.chars().count() > 8 {
+                return Err(AppError::BadRequest("avatar_emoji must be 8 characters or fewer".to_string()));
+            }
+            Some(e.clone())
+        }
+        _ => None,
+    };
+
+    let user = db::update_user_avatar(
+        &state.pool,
+        auth_user.user_id,
+        avatar_color.as_deref(),
+        avatar_emoji.as_deref(),
+    )
+    .await?;
+
+    let token = create_token(
+        user.id,
+        &user.display_name,
+        user.avatar_color.as_deref(),
+        user.avatar_emoji.as_deref(),
+    )?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user.id,
+            display_name: user.display_name,
+            avatar_color: user.avatar_color,
+            avatar_emoji: user.avatar_emoji,
+        },
     }))
 }
 

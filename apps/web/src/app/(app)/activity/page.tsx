@@ -40,7 +40,8 @@ function getZoneType(name: string | null | undefined): string | null {
   return null;
 }
 
-function getAvatarColor(id: string | null | undefined) {
+function getAvatarColor(id: string | null | undefined, storedColor?: string | null) {
+  if (storedColor) return storedColor;
   if (!id) return AVATAR_OUTFITS[0];
   let hash = 0;
   for (let i = 0; i < id.length; i++)
@@ -224,10 +225,10 @@ function WallTile({ x, y }: { x: number; y: number }) {
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 // SVG pixel-art sprite: 8×12 pixel grid at PX=4 → 32×48 SVG
 function Avatar({
-  x, y, color, dir, name, isSelf, isNearby,
+  x, y, color, dir, name, emoji, isSelf, isNearby,
 }: {
   x: number; y: number; color: string; dir: string;
-  name: string; isSelf: boolean; isNearby: boolean;
+  name: string; emoji?: string | null; isSelf: boolean; isNearby: boolean;
 }) {
   const SPRITE_W = 8  * PX; // 32
   const SPRITE_H = 12 * PX; // 48
@@ -255,6 +256,23 @@ function Avatar({
             animation: "pixel-pulse 2s ease-in-out infinite",
           }}
         />
+      )}
+
+      {/* Emoji badge — floats above sprite */}
+      {emoji && (
+        <div
+          style={{
+            position: "absolute",
+            top: -18,
+            fontSize: 14,
+            lineHeight: 1,
+            zIndex: 20,
+            filter: "drop-shadow(1px 1px 0 rgba(0,0,0,0.7))",
+            pointerEvents: "none",
+          }}
+        >
+          {emoji}
+        </div>
       )}
 
       {/* SVG pixel-art sprite */}
@@ -1056,11 +1074,14 @@ function ActivityContent() {
           {Array.from(presence.values()).map((p) => {
             const isSelf   = !!user && p.user_id === user.id;
             const isNearby = proximityPeers.includes(p.user_id);
+            // Use stored avatar_color for activity map too (not just self-override for highlight)
+            const storedColor = isSelf ? (user?.avatar_color ?? null) : (p.avatar_color ?? null);
             const color    = isSelf
-              ? "var(--primary)"
+              ? (storedColor || "var(--primary)")
               : isNearby
               ? "#22c55e"
-              : getAvatarColor(p.user_id);
+              : getAvatarColor(p.user_id, storedColor);
+            const emoji = isSelf ? (user?.avatar_emoji ?? null) : (p.avatar_emoji ?? null);
             return (
               <Avatar
                 key={p.user_id}
@@ -1069,6 +1090,7 @@ function ActivityContent() {
                 dir={p.dir}
                 name={p.display_name}
                 color={color}
+                emoji={emoji}
                 isSelf={isSelf}
                 isNearby={isNearby}
               />

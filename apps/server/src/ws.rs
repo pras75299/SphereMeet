@@ -51,7 +51,7 @@ pub async fn ws_handler(
         }
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, claims.sub, claims.display_name, query.space_id))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, claims.sub, claims.display_name, claims.avatar_color, claims.avatar_emoji, query.space_id))
 }
 
 /// Serialize a `WsMessage` to JSON string; logs and returns `None` on failure (prevents task panic).
@@ -70,6 +70,8 @@ async fn handle_socket(
     state: Arc<AppState>,
     user_id: Uuid,
     display_name: String,
+    avatar_color: Option<String>,
+    avatar_emoji: Option<String>,
     space_id: Uuid,
 ) {
     // Cache map/zones before add_client so spawn positions use walkable tiles and avoid races
@@ -79,12 +81,12 @@ async fn handle_socket(
     }
 
     let (mut sender, mut receiver) = socket.split();
-    
+
     // Use bounded channel to prevent memory exhaustion from slow clients
     let (tx, mut rx) = mpsc::channel::<String>(CHANNEL_CAPACITY);
 
     // Add client to state
-    state.add_client(space_id, user_id, display_name.clone(), tx).await;
+    state.add_client(space_id, user_id, display_name.clone(), avatar_color, avatar_emoji, tx).await;
 
     tracing::info!("User {} joined space {}", user_id, space_id);
 
@@ -106,7 +108,9 @@ async fn handle_socket(
                 "y": user_presence.y,
                 "dir": user_presence.dir,
                 "zone_id": user_presence.zone_id,
-                "display_name": display_name
+                "display_name": display_name,
+                "avatar_color": user_presence.avatar_color,
+                "avatar_emoji": user_presence.avatar_emoji
             }),
         };
         if let Some(text) = serialize_msg(&msg) {
@@ -120,6 +124,8 @@ async fn handle_socket(
             "presence": presence.iter().map(|p| json!({
                 "user_id": p.user_id,
                 "display_name": p.display_name,
+                "avatar_color": p.avatar_color,
+                "avatar_emoji": p.avatar_emoji,
                 "x": p.x,
                 "y": p.y,
                 "dir": p.dir,
@@ -383,6 +389,8 @@ async fn send_joined_message(
             "presence": presence.into_iter().map(|p| json!({
                 "user_id": p.user_id,
                 "display_name": p.display_name,
+                "avatar_color": p.avatar_color,
+                "avatar_emoji": p.avatar_emoji,
                 "x": p.x,
                 "y": p.y,
                 "dir": p.dir,

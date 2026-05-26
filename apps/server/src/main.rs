@@ -8,7 +8,7 @@ mod ws;
 use axum::{
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use serde_json::json;
@@ -136,7 +136,7 @@ async fn main() {
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE])
         .allow_credentials(true);
 
@@ -153,6 +153,7 @@ async fn main() {
         .route("/auth/register", post(handlers::auth::register))
         .route("/auth/login", post(handlers::auth::login))
         .route("/auth/guest", post(handlers::auth::create_guest))
+        .route("/me", patch(handlers::auth::patch_me))
         .route("/dev/seed", post(handlers::dev::seed))
         .route("/spaces", get(handlers::spaces::list_spaces).post(handlers::spaces::create_space))
         .route("/spaces/:id", get(handlers::spaces::get_space))

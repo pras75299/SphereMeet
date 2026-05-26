@@ -1,12 +1,23 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useStore } from "@/store";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080";
 
 const MAX_USER_SPACES = 3;
+
+const AVATAR_COLORS = [
+  { hex: "#e05c1a", label: "Ember" },
+  { hex: "#c8186e", label: "Fuchsia" },
+  { hex: "#d4a017", label: "Amber" },
+  { hex: "#1ea862", label: "Jade" },
+  { hex: "#0d8fc0", label: "Cyan" },
+  { hex: "#7c3aed", label: "Violet" },
+];
+
+const PRESET_EMOJIS = ["🚀", "⚡", "🎮", "🎯", "🔥", "🌟", "💎", "🐉", "🦄", "🎸"];
 
 const DEMO_ACCOUNTS = [
   { label: "Alice", email: "alice@spheremeet.demo", password: "demo1234" },
@@ -21,15 +32,47 @@ export default function HomePage() {
   const token = useStore((state) => state.token);
   const user = useStore((state) => state.user);
   const setAuth = useStore((state) => state.setAuth);
+  const updateUser = useStore((state) => state.updateUser);
   const clearAuth = useStore((state) => state.clearAuth);
   const isHydrated = useStore((state) => state.isHydrated);
   const hydrate = useStore((state) => state.hydrate);
 
   const [authTab, setAuthTab] = useState<AuthTab>("login");
 
+  // Avatar customization
+  const [showAvatarPanel, setShowAvatarPanel] = useState(false);
+  const [avatarColor, setAvatarColor] = useState<string>("");
+  const [avatarEmoji, setAvatarEmoji] = useState<string>("");
+  const [savingAvatar, setSavingAvatar] = useState(false);
+  const [avatarError, setAvatarError] = useState("");
+  const [avatarSuccess, setAvatarSuccess] = useState(false);
+  const avatarPanelRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (isHydrated && !token) setAuthTab("login");
   }, [isHydrated, token]);
+
+  // Sync avatar panel with current user values when it opens
+  useEffect(() => {
+    if (showAvatarPanel && user) {
+      setAvatarColor(user.avatar_color ?? "");
+      setAvatarEmoji(user.avatar_emoji ?? "");
+      setAvatarError("");
+      setAvatarSuccess(false);
+    }
+  }, [showAvatarPanel, user]);
+
+  // Close avatar panel on outside click
+  useEffect(() => {
+    if (!showAvatarPanel) return;
+    const handleClick = (e: MouseEvent) => {
+      if (avatarPanelRef.current && !avatarPanelRef.current.contains(e.target as Node)) {
+        setShowAvatarPanel(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showAvatarPanel]);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -195,6 +238,38 @@ export default function HomePage() {
       setCreateError(err instanceof Error ? err.message : "Could not create space");
     } finally {
       setCreatingSpace(false);
+    }
+  };
+
+  const handleSaveAvatar = async () => {
+    setAvatarError("");
+    setAvatarSuccess(false);
+    setSavingAvatar(true);
+    try {
+      const currentToken = useStore.getState().token;
+      const res = await fetch(`${API_BASE}/api/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({
+          avatar_color: avatarColor || null,
+          avatar_emoji: avatarEmoji || null,
+        }),
+      });
+      if (res.status === 401) { clearAuth(); return; }
+      const data = await res.json().catch(() => ({})) as { token?: string; user?: { id: string; display_name: string; avatar_color?: string; avatar_emoji?: string }; error?: string };
+      if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+      if (data.token && data.user) {
+        updateUser(data.token, data.user);
+      }
+      setAvatarSuccess(true);
+      setTimeout(() => setAvatarSuccess(false), 2500);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Could not save avatar");
+    } finally {
+      setSavingAvatar(false);
     }
   };
 
@@ -501,14 +576,193 @@ export default function HomePage() {
             </span>
           </div>
           <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-3">
-            <div
-              className="pixel-frame px-3 py-1"
-              style={{ background: "var(--surface-high)" }}
-            >
-              <span className="pixel-mono text-xs text-[var(--secondary)] tracking-widest uppercase">
-                {user.display_name}
-              </span>
+            {/* Avatar + name badge — click to open customization panel */}
+            <div className="relative" ref={avatarPanelRef}>
+              <button
+                type="button"
+                onClick={() => setShowAvatarPanel((v) => !v)}
+                className="pixel-frame px-3 py-1 flex items-center gap-2"
+                style={{ background: "var(--surface-high)", cursor: "pointer" }}
+                title="Customize avatar"
+              >
+                {/* Mini color swatch */}
+                <div
+                  style={{
+                    width: 12,
+                    height: 12,
+                    background: user.avatar_color || "#7c3aed",
+                    flexShrink: 0,
+                  }}
+                />
+                {user.avatar_emoji && (
+                  <span style={{ fontSize: 12, lineHeight: 1 }}>{user.avatar_emoji}</span>
+                )}
+                <span className="pixel-mono text-xs text-[var(--secondary)] tracking-widest uppercase">
+                  {user.display_name}
+                </span>
+                <span className="pixel-mono text-xs text-[var(--muted)]">▼</span>
+              </button>
+
+              {/* Avatar customization panel */}
+              {showAvatarPanel && (
+                <div
+                  className="absolute right-0 top-full mt-2 z-50"
+                  style={{
+                    width: 260,
+                    background: "var(--surface-mid)",
+                    boxShadow: "4px 4px 0 var(--background)",
+                    border: "1px solid var(--outline-dim)",
+                    padding: "1rem",
+                  }}
+                >
+                  <p className="pixel-mono text-xs text-[var(--muted)] uppercase tracking-widest mb-3">
+                    Avatar Customization
+                  </p>
+
+                  {/* Color preview + swatches */}
+                  <div className="mb-3">
+                    <p className="pixel-mono text-xs text-[var(--outline)] uppercase tracking-wider mb-2">
+                      Outfit Color
+                    </p>
+                    <div className="flex gap-2 flex-wrap">
+                      {AVATAR_COLORS.map((c) => (
+                        <button
+                          key={c.hex}
+                          type="button"
+                          onClick={() => setAvatarColor(c.hex)}
+                          title={c.label}
+                          style={{
+                            width: 28,
+                            height: 28,
+                            background: c.hex,
+                            outline: avatarColor === c.hex ? "3px solid var(--secondary)" : "2px solid transparent",
+                            outlineOffset: 1,
+                            cursor: "pointer",
+                            flexShrink: 0,
+                          }}
+                        />
+                      ))}
+                      {/* Clear button */}
+                      <button
+                        type="button"
+                        onClick={() => setAvatarColor("")}
+                        title="Random (hash-based)"
+                        style={{
+                          width: 28,
+                          height: 28,
+                          background: "var(--surface-low)",
+                          outline: avatarColor === "" ? "3px solid var(--secondary)" : "2px solid var(--outline-dim)",
+                          outlineOffset: 1,
+                          cursor: "pointer",
+                          fontSize: 10,
+                          color: "var(--muted)",
+                          fontFamily: "'Share Tech Mono', monospace",
+                          flexShrink: 0,
+                        }}
+                      >
+                        ?
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Emoji prefix */}
+                  <div className="mb-3">
+                    <p className="pixel-mono text-xs text-[var(--outline)] uppercase tracking-wider mb-2">
+                      Emoji Badge
+                    </p>
+                    <div className="flex gap-1 flex-wrap mb-2">
+                      {PRESET_EMOJIS.map((e) => (
+                        <button
+                          key={e}
+                          type="button"
+                          onClick={() => setAvatarEmoji(avatarEmoji === e ? "" : e)}
+                          style={{
+                            width: 28,
+                            height: 28,
+                            fontSize: 14,
+                            background: avatarEmoji === e ? "var(--surface-highest)" : "var(--surface-low)",
+                            outline: avatarEmoji === e ? "2px solid var(--secondary)" : "1px solid var(--outline-dim)",
+                            cursor: "pointer",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {e}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      value={avatarEmoji}
+                      onChange={(e) => setAvatarEmoji(e.target.value.slice(0, 8))}
+                      placeholder="Or type any emoji"
+                      className="pixel-input w-full px-3 py-2 text-sm"
+                      maxLength={8}
+                    />
+                  </div>
+
+                  {/* Preview */}
+                  <div
+                    className="mb-3 flex items-center gap-3 px-3 py-2"
+                    style={{ background: "var(--surface-low)" }}
+                  >
+                    <div style={{ position: "relative", display: "inline-block" }}>
+                      {avatarEmoji && (
+                        <span style={{ position: "absolute", top: -14, left: "50%", transform: "translateX(-50%)", fontSize: 12 }}>
+                          {avatarEmoji}
+                        </span>
+                      )}
+                      <div
+                        style={{
+                          width: 16,
+                          height: 20,
+                          background: avatarColor || "#7c3aed",
+                          outline: "1px solid rgba(255,255,255,0.15)",
+                        }}
+                      />
+                    </div>
+                    <span className="pixel-mono text-xs text-[var(--secondary)] uppercase tracking-widest">
+                      {user.display_name}
+                    </span>
+                  </div>
+
+                  {avatarError && (
+                    <p className="text-xs mb-2" style={{ color: "#fca5a5", fontFamily: "'Space Grotesk', sans-serif" }}>
+                      {avatarError}
+                    </p>
+                  )}
+                  {avatarSuccess && (
+                    <p className="text-xs mb-2" style={{ color: "#86efac", fontFamily: "'Space Grotesk', sans-serif" }}>
+                      Avatar saved!
+                    </p>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleSaveAvatar}
+                    disabled={savingAvatar}
+                    className="pixel-btn w-full py-2 pixel-mono text-xs uppercase tracking-widest disabled:opacity-50"
+                    style={{
+                      background: "var(--primary)",
+                      color: "#fff",
+                      borderBottom: "4px solid #312e81",
+                    }}
+                    onMouseDown={(e) => {
+                      if (!savingAvatar) {
+                        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(2px)";
+                        (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "2px";
+                      }
+                    }}
+                    onMouseUp={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.transform = "";
+                      (e.currentTarget as HTMLButtonElement).style.borderBottomWidth = "4px";
+                    }}
+                  >
+                    {savingAvatar ? "Saving..." : "Save Avatar"}
+                  </button>
+                </div>
+              )}
             </div>
+
             <button
               type="button"
               onClick={handleSeedSpace}

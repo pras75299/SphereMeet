@@ -1076,11 +1076,10 @@ function ActivityContent() {
             const isNearby = proximityPeers.includes(p.user_id);
             // Use stored avatar_color for activity map too (not just self-override for highlight)
             const storedColor = isSelf ? (user?.avatar_color ?? null) : (p.avatar_color ?? null);
-            const color    = isSelf
+            // Stored color always wins for peers — nearby state is conveyed through Avatar's isNearby halo, not by overriding outfit color.
+            const color = isSelf
               ? (storedColor || "var(--primary)")
-              : isNearby
-              ? "#22c55e"
-              : getAvatarColor(p.user_id, storedColor);
+              : (storedColor || (isNearby ? "#22c55e" : getAvatarColor(p.user_id)));
             const emoji = isSelf ? (user?.avatar_emoji ?? null) : (p.avatar_emoji ?? null);
             return (
               <Avatar

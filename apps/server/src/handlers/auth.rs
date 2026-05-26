@@ -232,10 +232,22 @@ pub async fn login(
 
 // ── Update Profile ────────────────────────────────────────────────────────────
 
+// True PATCH semantics: omitted field = preserve, null/empty = clear, value = set.
+// Double-Option lets us distinguish "field absent" (None) from "field explicitly null" (Some(None)).
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PatchMeRequest {
-    pub avatar_color: Option<String>,
-    pub avatar_emoji: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub avatar_color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub avatar_emoji: Option<Option<String>>,
 }
 
 pub async fn patch_me(
@@ -243,27 +255,35 @@ pub async fn patch_me(
     auth_user: AuthUser,
     Json(payload): Json<PatchMeRequest>,
 ) -> AppResult<Json<AuthResponse>> {
-    // Validate color: must be #rrggbb hex or null/empty to clear
-    let avatar_color: Option<String> = match &payload.avatar_color {
-        Some(c) if !c.is_empty() => {
+    let current = db::get_user(&state.pool, auth_user.user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    // Validate color: must be #rrggbb hex; null/empty clears; field absent preserves.
+    let avatar_color: Option<String> = match payload.avatar_color {
+        None => current.avatar_color,
+        Some(None) => None,
+        Some(Some(c)) if c.is_empty() => None,
+        Some(Some(c)) => {
             let c = c.trim();
             if c.len() != 7 || !c.starts_with('#') || !c[1..].chars().all(|ch| ch.is_ascii_hexdigit()) {
                 return Err(AppError::BadRequest("avatar_color must be a #rrggbb hex string".to_string()));
             }
             Some(c.to_lowercase())
         }
-        _ => None,
     };
 
-    // Validate emoji: max 8 chars (covers multi-byte emoji)
-    let avatar_emoji: Option<String> = match &payload.avatar_emoji {
-        Some(e) if !e.is_empty() => {
+    // Validate emoji: max 8 chars; null/empty clears; field absent preserves.
+    let avatar_emoji: Option<String> = match payload.avatar_emoji {
+        None => current.avatar_emoji,
+        Some(None) => None,
+        Some(Some(e)) if e.is_empty() => None,
+        Some(Some(e)) => {
             if e.chars().count() > 8 {
                 return Err(AppError::BadRequest("avatar_emoji must be 8 characters or fewer".to_string()));
             }
-            Some(e.clone())
+            Some(e)
         }
-        _ => None,
     };
 
     let user = db::update_user_avatar(
